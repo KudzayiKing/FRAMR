@@ -35,6 +35,7 @@ export type Version = {
   active: boolean;
   source?: boolean;
   earnings?: number;
+  videoUrl?: string;
 };
 
 export type Video = {
@@ -46,6 +47,7 @@ export type Video = {
   views: string;
   placements: Placement[];
   versions: Version[];
+  sourceVideoUrl?: string;
 };
 
 export type ProductAsset = {

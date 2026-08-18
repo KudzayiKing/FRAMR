@@ -44,6 +44,7 @@ import {
   type MarketplaceListing,
   type Placement,
   type ProductAsset,
+  type Version,
   type Video,
 } from "@/data/framr";
 import { signOut } from "@/lib/auth";
@@ -85,6 +86,7 @@ type PersistedVideoRow = {
   status: Video["status"];
   duration_seconds: number | null;
   thumbnail_key: string | null;
+  storage_key: string;
 };
 
 type PersistedPlacementRow = {
@@ -97,6 +99,16 @@ type PersistedPlacementRow = {
   quality: Placement["quality"];
   confidence: number;
   box: Record<string, number> | null;
+};
+type PersistedVersionRow = {
+  id: string;
+  placement_id: string;
+  label: string;
+  brand: string | null;
+  status: "draft" | "generating" | "ready" | "failed";
+  video_key: string | null;
+  thumbnail_key: string | null;
+  is_active: boolean;
 };
 
 function normalizeBox(box: Record<string, number> | null): Placement["box"] {
@@ -126,7 +138,7 @@ async function resolvePrivateUrl(client: NonNullable<ReturnType<typeof getBrowse
   if (!key) return fallback;
   const [bucket, ...pathParts] = key.split("/");
   const objectPath = pathParts.join("/");
-  if (!["thumbnails", "products"].includes(bucket) || !objectPath) return fallback;
+  if (!["thumbnails", "products", "videos", "generated"].includes(bucket) || !objectPath) return fallback;
   const { data, error } = await client.storage.from(bucket).createSignedUrl(objectPath, 60 * 60);
   return !error && data?.signedUrl ? data.signedUrl : fallback;
 }
@@ -142,7 +154,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [videos, setVideos] = useState<Video[]>(() => isSupabaseConfigured ? [] : initialVideos);
-  const [assets, setAssets] = useState<ProductAsset[]>(initialAssets);
+  const [assets, setAssets] = useState<ProductAsset[]>(() => isSupabaseConfigured ? [] : initialAssets);
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns);
   const [modal, setModal] = useState<"upload" | "product" | "campaign" | "generate" | "export" | null>(null);
   const [reserve, setReserve] = useState<MarketplaceListing | null>(null);
@@ -160,7 +172,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     const [videoResponse, placementResponse] = await Promise.all([
       client
         .from("videos")
-        .select("id,title,status,duration_seconds,thumbnail_key")
+        .select("id,title,status,duration_seconds,thumbnail_key,storage_key")
         .eq("owner_id", user.id)
         .order("created_at", { ascending: false }),
       client
@@ -174,22 +186,48 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       return;
     }
 
+    const placementRows = (placementResponse.data ?? []) as PersistedPlacementRow[];
     const placementsByVideo = new Map<string, Placement[]>();
-    for (const row of (placementResponse.data ?? []) as PersistedPlacementRow[]) {
+    const videoByPlacement = new Map<string, string>();
+    for (const row of placementRows) {
       const current = placementsByVideo.get(row.video_id) ?? [];
       current.push(toPlacement(row));
       placementsByVideo.set(row.video_id, current);
+      videoByPlacement.set(row.id, row.video_id);
     }
-    const hydrated = await Promise.all(((videoResponse.data ?? []) as PersistedVideoRow[]).map(async (row) => ({
-      id: row.id,
-      title: row.title,
-      thumbnail: await resolvePrivateUrl(client, row.thumbnail_key, IMG.original),
-      duration: formatDuration(row.duration_seconds),
-      status: row.status,
-      views: "—",
-      placements: placementsByVideo.get(row.id) ?? [],
-      versions: [],
-    })));
+    const placementIds = placementRows.map((row) => row.id);
+    const versionResponse = placementIds.length ? await client
+      .from("placement_versions")
+      .select("id,placement_id,label,brand,status,video_key,thumbnail_key,is_active")
+      .in("placement_id", placementIds)
+      .order("created_at", { ascending: true }) : { data: [], error: null };
+    if (versionResponse.error) { toast.error("Could not load generated versions."); return; }
+    const versionsByVideo = new Map<string, Version[]>();
+    for (const row of (versionResponse.data ?? []) as PersistedVersionRow[]) {
+      const videoId = videoByPlacement.get(row.placement_id);
+      if (!videoId || row.status !== "ready") continue;
+      const current = versionsByVideo.get(videoId) ?? [];
+      const image = await resolvePrivateUrl(client, row.thumbnail_key, IMG.original);
+      const videoUrl = await resolvePrivateUrl(client, row.video_key, "");
+      current.push({ id: row.id, label: row.label, brand: row.brand ?? "Product", image, active: row.is_active, videoUrl: videoUrl || undefined });
+      versionsByVideo.set(videoId, current);
+    }
+    const hydrated = await Promise.all(((videoResponse.data ?? []) as PersistedVideoRow[]).map(async (row) => {
+      const thumbnail = await resolvePrivateUrl(client, row.thumbnail_key, IMG.original);
+      const sourceVideoUrl = await resolvePrivateUrl(client, row.storage_key, "");
+      const source: Version = { id: `source-${row.id}`, label: "Original", brand: "Source", image: thumbnail, active: true, source: true, videoUrl: sourceVideoUrl || undefined };
+      return {
+        id: row.id,
+        title: row.title,
+        thumbnail,
+        duration: formatDuration(row.duration_seconds),
+        status: row.status,
+        views: "—",
+        placements: placementsByVideo.get(row.id) ?? [],
+        versions: [source, ...(versionsByVideo.get(row.id) ?? [])],
+        sourceVideoUrl: sourceVideoUrl || undefined,
+      };
+    }));
     setVideos(hydrated);
     setSelectedVideoId((current) => hydrated.some((video) => video.id === current) ? current : hydrated[0]?.id ?? "");
   }, []);
@@ -208,6 +246,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       image: await resolvePrivateUrl(client, product.image_key, IMG.aurisProduct),
     })));
     setGenerationProducts(hydrated);
+    setAssets(hydrated.map((product) => ({ id: product.id, name: product.name, brand: product.brand ?? "Your brand", category: "Product", image: product.image, frame: product.image })));
   }, []);
 
   useEffect(() => {
@@ -227,6 +266,16 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
           "postgres_changes",
           { event: "*", schema: "public", table: "videos", filter: `owner_id=eq.${user.id}` },
           () => { void loadCreatorVideos(); },
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "placement_versions" },
+          () => { void loadCreatorVideos(); },
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "products", filter: `owner_id=eq.${user.id}` },
+          () => { void loadGenerationProducts(); },
         )
         .subscribe();
     };
@@ -294,15 +343,23 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     onProduct: () => setModal("product"),
     onCampaign: () => setModal("campaign"),
     onGenerate: () => setModal("generate"),
-    onExport: (label: string) => {
+    onExport: async (versionId: string, label: string) => {
       setExportLabel(label);
-      setModal("export");
+      if (versionId.startsWith("source-")) { toast.error("The source video is protected. Export a generated version instead."); return; }
+      const response = await fetch(`/api/versions/${versionId}`);
+      const body = await response.json().catch(() => null) as { url?: string; error?: string } | null;
+      if (!response.ok || !body?.url) { toast.error(body?.error ?? "An export link could not be created."); return; }
+      window.open(body.url, "_blank", "noopener,noreferrer");
     },
     onReserve: (listing: MarketplaceListing) => setReserve(listing),
-    onToggleVersion: (videoId: string, versionId: string) => setVideos((current) => current.map((video) => video.id !== videoId ? video : {
-      ...video,
-      versions: video.versions.map((version) => version.id === versionId ? { ...version, active: !version.active } : version),
-    })),
+    onToggleVersion: async (_videoId: string, versionId: string) => {
+      if (versionId.startsWith("source-")) return;
+      const current = selectedVideo?.versions.find((version) => version.id === versionId);
+      const response = await fetch(`/api/versions/${versionId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: current?.active ? "deactivate" : "activate" }) });
+      const body = await response.json().catch(() => null) as { error?: string } | null;
+      if (!response.ok) { toast.error(body?.error ?? "The active version could not be updated."); return; }
+      await loadCreatorVideos();
+    },
     onToast: (message: string) => toast(message),
   };
 
@@ -339,7 +396,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       <main className="mx-auto w-full max-w-[1400px] p-5 sm:p-8">{role === "creator" ? <CreatorWorkspace {...contentProps} /> : <AdvertiserWorkspace {...contentProps} />}</main>
     </div>
     <UploadVideoModal open={modal === "upload"} onClose={() => setModal(null)} onComplete={addVideo} />
-    <ProductModal open={modal === "product"} onClose={() => setModal(null)} onSave={(asset) => setAssets((items) => [...items, asset])} />
+    <ProductModal open={modal === "product"} onClose={() => setModal(null)} onSave={(asset) => { setAssets((items) => [asset, ...items]); void loadGenerationProducts(); }} />
     <CampaignModal open={modal === "campaign"} onClose={() => setModal(null)} onCreate={(campaign) => setCampaigns((items) => [campaign, ...items])} />
     <GenerationModal
       open={modal === "generate"}
