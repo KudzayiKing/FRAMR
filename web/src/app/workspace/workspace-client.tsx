@@ -1,7 +1,7 @@
 /** Design reference: the application workspace keeps the source's permanent role-based sidebar and compact operational header. */
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   BarChart3,
@@ -42,6 +42,7 @@ import {
   initialVideos,
   type Campaign,
   type MarketplaceListing,
+  type Placement,
   type ProductAsset,
   type Video,
 } from "@/data/framr";
@@ -51,13 +52,6 @@ import { getBrowserClient, isSupabaseConfigured } from "@/lib/supabase-browser";
 export type Role = "creator" | "advertiser";
 type WorkspaceProps = { role: Role; onExit: () => void; onSignOut: () => void };
 type NavItem = { id: string; label: string; icon: typeof LayoutGrid };
-type VideoRealtimeRow = {
-  id: string;
-  title: string;
-  status: Video["status"];
-  duration_seconds: number | null;
-  thumbnail_key: string | null;
-};
 
 const creatorNav: NavItem[] = [
   { id: "home", label: "Home", icon: LayoutGrid },
@@ -82,6 +76,58 @@ const advertiserNav: NavItem[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
+type PersistedVideoRow = {
+  id: string;
+  title: string;
+  status: Video["status"];
+  duration_seconds: number | null;
+  thumbnail_key: string | null;
+};
+
+type PersistedPlacementRow = {
+  id: string;
+  video_id: string;
+  object_label: string;
+  category: string | null;
+  start_seconds: number;
+  end_seconds: number;
+  quality: Placement["quality"];
+  confidence: number;
+  box: Record<string, number> | null;
+};
+
+function normalizeBox(box: Record<string, number> | null): Placement["box"] {
+  return {
+    left: Math.max(0, Math.min(100, Number(box?.left ?? 0) * 100)),
+    top: Math.max(0, Math.min(100, Number(box?.top ?? 0) * 100)),
+    width: Math.max(0, Math.min(100, Number(box?.width ?? 0) * 100)),
+    height: Math.max(0, Math.min(100, Number(box?.height ?? 0) * 100)),
+  };
+}
+
+function toPlacement(row: PersistedPlacementRow): Placement {
+  return {
+    id: row.id,
+    object: row.object_label,
+    category: row.category ?? "Uncategorized",
+    start: formatDuration(row.start_seconds),
+    end: formatDuration(row.end_seconds),
+    duration: Math.max(0, row.end_seconds - row.start_seconds),
+    quality: row.quality,
+    confidence: Math.round(row.confidence * 100),
+    box: normalizeBox(row.box),
+  };
+}
+
+async function resolveThumbnailUrl(client: NonNullable<ReturnType<typeof getBrowserClient>>, key: string | null) {
+  if (!key) return IMG.original;
+  const [bucket, ...pathParts] = key.split("/");
+  const objectPath = pathParts.join("/");
+  if (bucket !== "thumbnails" || !objectPath) return IMG.original;
+  const { data, error } = await client.storage.from(bucket).createSignedUrl(objectPath, 60 * 60);
+  return !error && data?.signedUrl ? data.signedUrl : IMG.original;
+}
+
 function formatDuration(seconds: number | null) {
   if (!seconds || !Number.isFinite(seconds)) return "—";
   const total = Math.round(seconds);
@@ -92,13 +138,56 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
   const [page, setPage] = useState(role === "creator" ? "home" : "overview");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [videos, setVideos] = useState<Video[]>(initialVideos);
+  const [videos, setVideos] = useState<Video[]>(() => isSupabaseConfigured ? [] : initialVideos);
   const [assets, setAssets] = useState<ProductAsset[]>(initialAssets);
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns);
   const [modal, setModal] = useState<"upload" | "product" | "campaign" | "generate" | "export" | null>(null);
   const [reserve, setReserve] = useState<MarketplaceListing | null>(null);
   const [selectedVideoId, setSelectedVideoId] = useState("v1");
   const [exportLabel, setExportLabel] = useState("Auris Model A");
+
+  const loadCreatorVideos = useCallback(async () => {
+    const client = getBrowserClient();
+    if (!client) return;
+    const { data: { user } } = await client.auth.getUser();
+    if (!user) return;
+
+    const [videoResponse, placementResponse] = await Promise.all([
+      client
+        .from("videos")
+        .select("id,title,status,duration_seconds,thumbnail_key")
+        .eq("owner_id", user.id)
+        .order("created_at", { ascending: false }),
+      client
+        .from("placements")
+        .select("id,video_id,object_label,category,start_seconds,end_seconds,quality,confidence,box")
+        .eq("owner_id", user.id)
+        .order("start_seconds", { ascending: true }),
+    ]);
+    if (videoResponse.error || placementResponse.error) {
+      toast.error("Could not load your video library.");
+      return;
+    }
+
+    const placementsByVideo = new Map<string, Placement[]>();
+    for (const row of (placementResponse.data ?? []) as PersistedPlacementRow[]) {
+      const current = placementsByVideo.get(row.video_id) ?? [];
+      current.push(toPlacement(row));
+      placementsByVideo.set(row.video_id, current);
+    }
+    const hydrated = await Promise.all(((videoResponse.data ?? []) as PersistedVideoRow[]).map(async (row) => ({
+      id: row.id,
+      title: row.title,
+      thumbnail: await resolveThumbnailUrl(client, row.thumbnail_key),
+      duration: formatDuration(row.duration_seconds),
+      status: row.status,
+      views: "—",
+      placements: placementsByVideo.get(row.id) ?? [],
+      versions: [],
+    })));
+    setVideos(hydrated);
+    setSelectedVideoId((current) => hydrated.some((video) => video.id === current) ? current : hydrated[0]?.id ?? "");
+  }, []);
 
   useEffect(() => {
     if (role !== "creator" || !isSupabaseConfigured) return;
@@ -108,22 +197,15 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     let channel: ReturnType<typeof client.channel> | null = null;
     let cancelled = false;
     const subscribe = async () => {
+      await loadCreatorVideos();
       const { data: { user } } = await client.auth.getUser();
       if (cancelled || !user) return;
       channel = client
         .channel(`framr-video-status-${user.id}`)
         .on(
           "postgres_changes",
-          { event: "UPDATE", schema: "public", table: "videos", filter: `owner_id=eq.${user.id}` },
-          (event) => {
-            const row = event.new as VideoRealtimeRow;
-            setVideos((current) => current.map((video) => video.id === row.id ? {
-              ...video,
-              title: row.title,
-              status: row.status,
-              duration: formatDuration(row.duration_seconds),
-            } : video));
-          },
+          { event: "*", schema: "public", table: "videos", filter: `owner_id=eq.${user.id}` },
+          () => { void loadCreatorVideos(); },
         )
         .subscribe();
     };
@@ -133,7 +215,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       cancelled = true;
       if (channel) void client.removeChannel(channel);
     };
-  }, [role]);
+  }, [loadCreatorVideos, role]);
 
   const nav = role === "creator" ? creatorNav : advertiserNav;
   const title = nav.find((item) => item.id === page)?.label ?? page;
