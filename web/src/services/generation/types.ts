@@ -1,37 +1,40 @@
-/** AI generation abstraction — §5/§27. The app must never know which model made a video.
- *  Providers stay isolated; app code only sees this interface. */
+/** Provider-neutral contract for server-side video-generation workers. */
+export type GenerationStatus = "queued" | "analyzing" | "generating" | "finalizing" | "complete" | "failed" | "retrying" | "canceled";
 
-export type GenerationInput = {
-  videoStorageKey: string;
-  placementId: string;
-  /** Box normalized 0..1 (left/top/width/height), start/end in seconds */
-  region: { left: number; top: number; width: number; height: number };
-  timeRange: { startSeconds: number; endSeconds: number };
-  productImageStorageKey: string;
-  productName?: string;
-  targetResolution?: { width: number; height: number };
+export type ProviderSubmission = {
+  sourceVideo: Blob;
+  sourceVideoFilename?: string;
+  prompt: string;
+  referenceImage?: Blob;
+  referenceImageFilename?: string;
+  resolution?: "720p";
 };
 
 export type GenerationHandle = {
   jobRef: string;
-  status: "queued" | "analyzing" | "generating" | "finalizing" | "complete" | "failed" | "retrying" | "canceled";
-  /** Present once complete; object-storage key for the generated video */
-  resultStorageKey?: string;
+  status: GenerationStatus;
+  providerStatus?: string;
   error?: string;
 };
 
 export interface VideoGenerationProvider {
   readonly name: string;
-  generatePlacement(input: GenerationInput): Promise<GenerationHandle>;
+  readonly model: string;
+  submitGeneration(input: ProviderSubmission): Promise<GenerationHandle>;
   getGenerationStatus(jobRef: string): Promise<GenerationHandle>;
+  downloadResult(jobRef: string): Promise<Uint8Array>;
   cancelGeneration(jobRef: string): Promise<void>;
 }
 
-/** Factory: picks Decart when configured, otherwise the deterministic dev adapter.
- *  Swapping providers = config, not app rewrite (§44). Import-time only —
- *  Decart is only selected when DECART_API_KEY is set (§35: secrets server-side). */
+/**
+ * Select a provider only inside trusted server or worker code. The browser never
+ * receives the Decart API key. A missing key intentionally selects the local
+ * deterministic provider so queue, storage, and UI flows remain testable.
+ */
 export async function getGenerationProvider(): Promise<VideoGenerationProvider> {
-  if (process.env.DECART_API_KEY) {
+  const mode = process.env.FRAMR_GENERATION_MODE ?? (process.env.DECART_API_KEY ? "decart" : "mock");
+  if (mode === "decart") {
+    if (!process.env.DECART_API_KEY) throw new Error("DECART_API_KEY is required when FRAMR_GENERATION_MODE=decart.");
     const { createDecartProvider } = await import("./decart");
     return createDecartProvider();
   }

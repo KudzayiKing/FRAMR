@@ -1,7 +1,7 @@
 /** Design reference: the application workspace keeps the source's permanent role-based sidebar and compact operational header. */
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ArrowLeft,
   BarChart3,
@@ -47,10 +47,13 @@ import {
   type Video,
 } from "@/data/framr";
 import { signOut } from "@/lib/auth";
+import type { GenerationStatus } from "@/services/generation/types";
 import { getBrowserClient, isSupabaseConfigured } from "@/lib/supabase-browser";
 
 export type Role = "creator" | "advertiser";
 type WorkspaceProps = { role: Role; onExit: () => void; onSignOut: () => void };
+type GenerationProduct = { id: string; name: string; brand: string | null; image: string };
+type GenerationJob = { id: string; status: GenerationStatus; version_id: string | null; error: string | null; cost_cents: number | null };
 type NavItem = { id: string; label: string; icon: typeof LayoutGrid };
 
 const creatorNav: NavItem[] = [
@@ -119,13 +122,13 @@ function toPlacement(row: PersistedPlacementRow): Placement {
   };
 }
 
-async function resolveThumbnailUrl(client: NonNullable<ReturnType<typeof getBrowserClient>>, key: string | null) {
-  if (!key) return IMG.original;
+async function resolvePrivateUrl(client: NonNullable<ReturnType<typeof getBrowserClient>>, key: string | null, fallback: string) {
+  if (!key) return fallback;
   const [bucket, ...pathParts] = key.split("/");
   const objectPath = pathParts.join("/");
-  if (bucket !== "thumbnails" || !objectPath) return IMG.original;
+  if (!["thumbnails", "products"].includes(bucket) || !objectPath) return fallback;
   const { data, error } = await client.storage.from(bucket).createSignedUrl(objectPath, 60 * 60);
-  return !error && data?.signedUrl ? data.signedUrl : IMG.original;
+  return !error && data?.signedUrl ? data.signedUrl : fallback;
 }
 
 function formatDuration(seconds: number | null) {
@@ -145,6 +148,8 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
   const [reserve, setReserve] = useState<MarketplaceListing | null>(null);
   const [selectedVideoId, setSelectedVideoId] = useState("v1");
   const [exportLabel, setExportLabel] = useState("Auris Model A");
+  const [generationProducts, setGenerationProducts] = useState<GenerationProduct[]>([]);
+  const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
 
   const loadCreatorVideos = useCallback(async () => {
     const client = getBrowserClient();
@@ -178,7 +183,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     const hydrated = await Promise.all(((videoResponse.data ?? []) as PersistedVideoRow[]).map(async (row) => ({
       id: row.id,
       title: row.title,
-      thumbnail: await resolveThumbnailUrl(client, row.thumbnail_key),
+      thumbnail: await resolvePrivateUrl(client, row.thumbnail_key, IMG.original),
       duration: formatDuration(row.duration_seconds),
       status: row.status,
       views: "—",
@@ -189,6 +194,22 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     setSelectedVideoId((current) => hydrated.some((video) => video.id === current) ? current : hydrated[0]?.id ?? "");
   }, []);
 
+  const loadGenerationProducts = useCallback(async () => {
+    const client = getBrowserClient();
+    if (!client) return;
+    const { data: { user } } = await client.auth.getUser();
+    if (!user) return;
+    const { data, error } = await client.from("products").select("id,name,brand,image_key").eq("owner_id", user.id).order("created_at", { ascending: false });
+    if (error) return;
+    const hydrated = await Promise.all((data ?? []).filter((product) => product.image_key).map(async (product) => ({
+      id: product.id,
+      name: product.name,
+      brand: product.brand,
+      image: await resolvePrivateUrl(client, product.image_key, IMG.aurisProduct),
+    })));
+    setGenerationProducts(hydrated);
+  }, []);
+
   useEffect(() => {
     if (role !== "creator" || !isSupabaseConfigured) return;
     const client = getBrowserClient();
@@ -197,7 +218,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     let channel: ReturnType<typeof client.channel> | null = null;
     let cancelled = false;
     const subscribe = async () => {
-      await loadCreatorVideos();
+      await Promise.all([loadCreatorVideos(), loadGenerationProducts()]);
       const { data: { user } } = await client.auth.getUser();
       if (cancelled || !user) return;
       channel = client
@@ -215,27 +236,40 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       cancelled = true;
       if (channel) void client.removeChannel(channel);
     };
-  }, [loadCreatorVideos, role]);
+  }, [loadCreatorVideos, loadGenerationProducts, role]);
+
+  useEffect(() => {
+    if (!generationJob?.id || !isSupabaseConfigured) return;
+    const client = getBrowserClient();
+    if (!client) return;
+    const channel = client
+      .channel(`framr-generation-${generationJob.id}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "generation_jobs", filter: `id=eq.${generationJob.id}` }, (event) => {
+        const row = event.new as GenerationJob;
+        setGenerationJob((current) => current?.id === row.id ? { ...current, ...row } : current);
+      })
+      .subscribe();
+    return () => { void client.removeChannel(channel); };
+  }, [generationJob?.id]);
+
+  const queueGeneration = async (productId: string) => {
+    const placementId = selectedVideo?.placements[0]?.id;
+    if (!placementId) { toast.error("Select a detected placement before creating a version."); return; }
+    const response = await fetch("/api/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ placementId, productId }),
+    });
+    const body = await response.json().catch(() => null) as { generation?: GenerationJob; error?: string } | null;
+    if (!response.ok || !body?.generation) { toast.error(body?.error ?? "Generation could not be queued."); return; }
+    setGenerationJob(body.generation);
+  };
 
   const nav = role === "creator" ? creatorNav : advertiserNav;
   const title = nav.find((item) => item.id === page)?.label ?? page;
-  const selectedVideo = useMemo(
-    () => videos.find((video) => video.id === selectedVideoId) ?? videos[0] ?? null,
-    [videos, selectedVideoId],
-  );
+  const selectedVideo = videos.find((video) => video.id === selectedVideoId) ?? videos[0] ?? null;
 
   const updateVersion = () => {
-    if (!selectedVideo) return;
-    setVideos((current) => current.map((video) => video.id === selectedVideo.id ? {
-      ...video,
-      versions: [...video.versions, {
-        id: `version-${Date.now()}`,
-        label: "Auris Model A",
-        brand: "Auris",
-        image: IMG.auris,
-        active: false,
-      }],
-    } : video));
     setPage("versions");
   };
 
@@ -307,7 +341,15 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     <UploadVideoModal open={modal === "upload"} onClose={() => setModal(null)} onComplete={addVideo} />
     <ProductModal open={modal === "product"} onClose={() => setModal(null)} onSave={(asset) => setAssets((items) => [...items, asset])} />
     <CampaignModal open={modal === "campaign"} onClose={() => setModal(null)} onCreate={(campaign) => setCampaigns((items) => [campaign, ...items])} />
-    <GenerationModal open={modal === "generate"} onClose={() => setModal(null)} video={selectedVideo} onFinish={updateVersion} />
+    <GenerationModal
+      open={modal === "generate"}
+      onClose={() => setModal(null)}
+      video={selectedVideo}
+      products={generationProducts}
+      generation={generationJob}
+      onStart={queueGeneration}
+      onFinish={updateVersion}
+    />
     <ExportModal open={modal === "export"} onClose={() => setModal(null)} label={exportLabel} />
     <ReserveModal listing={reserve} open={Boolean(reserve)} onClose={() => setReserve(null)} />
   </div>;
