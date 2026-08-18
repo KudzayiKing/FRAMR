@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -p 3001",
     "lint": "eslint",
-    "worker": "npm run worker:generation",
+    "worker": "tsx src/workers/generation-worker.ts",
     "worker:generation": "tsx src/workers/generation-worker.ts"
   },
   "dependencies": {
