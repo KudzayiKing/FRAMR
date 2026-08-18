@@ -139,6 +139,9 @@ async function resolvePrivateUrl(client: NonNullable<ReturnType<typeof getBrowse
   const [bucket, ...pathParts] = key.split("/");
   const objectPath = pathParts.join("/");
   if (!["thumbnails", "products", "videos", "generated"].includes(bucket) || !objectPath) return fallback;
+  const [ownerId, fileName] = pathParts;
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ownerId ?? "");
+  if (!isUuid || !fileName) return fallback;
   const { data, error } = await client.storage.from(bucket).createSignedUrl(objectPath, 60 * 60);
   return !error && data?.signedUrl ? data.signedUrl : fallback;
 }

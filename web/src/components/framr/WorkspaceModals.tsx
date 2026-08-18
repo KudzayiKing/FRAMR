@@ -115,7 +115,7 @@ export function UploadVideoModal({ open, onClose, onComplete }: { open: boolean;
       onComplete({
         id: body.video.id,
         title: body.video.title,
-        thumbnail: URL.createObjectURL(selectedFile),
+        thumbnail: IMG.original,
         duration: `00:${String(duration).padStart(2, "0")}`,
         status: "processing",
         views: "—",
