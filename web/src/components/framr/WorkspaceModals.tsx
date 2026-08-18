@@ -17,16 +17,124 @@ export function SignInModal({ open, onOpenChange, onEnter }: { open: boolean; on
   return <Modal open={open} onClose={() => onOpenChange(false)} title="Sign in to FRAMR" className="max-w-md"><div className="px-7 pb-7"><p className="mt-1 text-sm text-inksoft">Choose a workspace to continue. This demo ships with seeded creator & advertiser data.</p><div className="mt-6 grid gap-3"><button onClick={() => enter("creator")} className="frame-grow relative flex items-center gap-3 rounded-lg border border-line p-4 text-left transition hover:border-ink/40"><FrameCorners className="text-accent opacity-0 transition frame-grow-hover:opacity-100" /><span className="flex h-10 w-10 items-center justify-center rounded-lg bg-ink text-paper"><Clapperboard size={20} /></span><span><span className="block text-sm font-bold">Continue as Creator</span><span className="mt-0.5 block text-xs text-inksoft">Lena · 4 videos · 9 placements · $500 earned</span></span><ArrowRight className="ml-auto text-inksoft" size={16} /></button><button onClick={() => enter("advertiser")} className="frame-grow relative flex items-center gap-3 rounded-lg border border-line p-4 text-left transition hover:border-ink/40"><span className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent text-white"><Megaphone size={20} /></span><span><span className="block text-sm font-bold">Continue as Advertiser</span><span className="mt-0.5 block text-xs text-inksoft">Auris · 3 campaigns · 420K est. impressions</span></span><ArrowRight className="ml-auto text-inksoft" size={16} /></button></div><p className="mt-5 text-center text-[11px] text-inksoft">Demo bypass enabled · source integrations are represented as client-side flows.</p></div></Modal>;
 }
 
-export function UploadVideoModal({ open, onClose, onComplete }: { open: boolean; onClose: () => void; onComplete: () => void }) {
-  const [phase, setPhase] = useState<"idle" | "running" | "complete">("idle");
+export function UploadVideoModal({ open, onClose, onComplete }: { open: boolean; onClose: () => void; onComplete: (video: Video) => void }) {
+  const [phase, setPhase] = useState<"idle" | "validating" | "ready" | "uploading" | "creating" | "complete">("idle");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [metadata, setMetadata] = useState<{ durationSeconds: number; width: number; height: number } | null>(null);
+  const [title, setTitle] = useState("");
   const [progress, setProgress] = useState(0);
-  useEffect(() => { if (phase !== "running") return; const timer = window.setInterval(() => setProgress((value) => Math.min(100, value + 13)), 150); return () => window.clearInterval(timer); }, [phase]);
-  useEffect(() => { if (progress === 100 && phase === "running") { const timer = window.setTimeout(() => setPhase("complete"), 900); return () => window.clearTimeout(timer); } }, [progress, phase]);
-  const close = () => { setPhase("idle"); setProgress(0); onClose(); };
-  const complete = () => { onComplete(); close(); toast("Upload complete — 3 placements detected."); };
-  return <Modal open={open} onClose={close} title="Upload a video"><div className="px-7 pb-7">{phase === "idle" ? <><button onClick={() => setPhase("running")} className="frame-grow relative mt-6 flex w-full flex-col items-center gap-3 rounded-xl border-2 border-dashed border-line bg-paper2/60 p-10 text-center transition hover:bg-paper2"><FrameCorners className="text-accent" /><span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink text-paper"><Upload size={20} /></span><span className="text-sm font-bold">Drop your vertical video here</span><span className="text-xs leading-relaxed text-inksoft">MP4 or MOV · 9:16 · 15–60 seconds · max 500 MB<br />Stored in your private bucket.</span></button><div className="mt-4 grid grid-cols-3 gap-2 text-[11px] text-inksoft"><span>Vertical 1080×1920</span><span>15–60s runtime</span><span>Private by default</span></div></> : <div className="mt-6"><div className="flex items-center gap-3"><div className="striped h-16 w-12 rounded-md bg-ink" /><div className="min-w-0 flex-1"><div className="truncate text-sm font-bold">fried_rice_final_v3.mp4</div><div className="text-xs text-inksoft">48.2 MB · 1080×1920 · 00:34</div></div><span className="text-xs font-bold text-accent">{progress}%</span></div><div className="mt-4 h-1.5 overflow-hidden rounded-full bg-paper2"><div className="h-full rounded-full bg-accent transition-all duration-200" style={{ width: `${progress}%` }} /></div><div className="mt-6 space-y-3">{["Uploading to storage", "Preparing video", "Analyzing scenes", "Finding placements"].map((step, index) => <div key={step} className="flex items-center gap-3 text-sm"><span className="flex h-6 w-6 items-center justify-center rounded-full border border-line bg-paper2">{phase === "complete" || progress > (index + 1) * 20 ? <Check size={14} className="text-emerald-600" /> : <Loader2 size={14} className="animate-spin text-accent" />}</span><span className={phase === "complete" || progress > (index + 1) * 20 ? "" : "text-inksoft"}>{step}</span></div>)}</div>{phase === "complete" && <FramrButton className="mt-6 w-full" onClick={complete}>Review placements <ArrowRight size={16} /></FramrButton>}</div>}</div></Modal>;
-}
+  const [error, setError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const inputId = "framr-video-file";
 
+  const reset = () => {
+    setPhase("idle");
+    setSelectedFile(null);
+    setMetadata(null);
+    setTitle("");
+    setProgress(0);
+    setError(null);
+    setDragging(false);
+  };
+
+  const close = () => {
+    if (phase === "uploading" || phase === "creating") return;
+    reset();
+    onClose();
+  };
+
+  const selectFile = async (file: File | undefined) => {
+    if (!file) return;
+    setError(null);
+    const { validateVideoFile, inspectVideo, validateVideoMetadata, titleFromFilename } = await import("@/lib/video-upload");
+    const fileError = validateVideoFile(file);
+    if (fileError) {
+      setSelectedFile(null);
+      setMetadata(null);
+      setPhase("idle");
+      setError(fileError);
+      return;
+    }
+    setPhase("validating");
+    try {
+      const nextMetadata = await inspectVideo(file);
+      const metadataError = validateVideoMetadata(nextMetadata);
+      if (metadataError) {
+        setSelectedFile(null);
+        setMetadata(null);
+        setPhase("idle");
+        setError(metadataError);
+        return;
+      }
+      setSelectedFile(file);
+      setMetadata(nextMetadata);
+      setTitle(titleFromFilename(file.name));
+      setPhase("ready");
+    } catch (nextError) {
+      setSelectedFile(null);
+      setMetadata(null);
+      setPhase("idle");
+      setError(nextError instanceof Error ? nextError.message : "This video could not be read.");
+    }
+  };
+
+  const upload = async () => {
+    if (!selectedFile || !metadata || !title.trim()) return;
+    const { getBrowserClient, isSupabaseConfigured } = await import("@/lib/supabase-browser");
+    const { uploadVideoToSupabase } = await import("@/lib/video-upload");
+    const client = getBrowserClient();
+    if (!isSupabaseConfigured || !client) {
+      setError("Video uploads require a configured Supabase project.");
+      return;
+    }
+    setError(null);
+    setProgress(0);
+    setPhase("uploading");
+    let uploaded: Awaited<ReturnType<typeof uploadVideoToSupabase>> | null = null;
+    try {
+      uploaded = await uploadVideoToSupabase({ client, file: selectedFile, metadata, onProgress: setProgress });
+      setPhase("creating");
+      const response = await fetch("/api/videos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: title.trim(),
+          storageKey: uploaded.storageKey,
+          mimeType: uploaded.contentType,
+          sizeBytes: uploaded.sizeBytes,
+          durationSeconds: uploaded.durationSeconds,
+          width: uploaded.width,
+          height: uploaded.height,
+        }),
+      });
+      const body = (await response.json()) as { error?: string; video?: { id: string; title: string; status: "processing"; duration_seconds: number; width: number; height: number; storage_key: string; thumbnail_key: string | null } };
+      if (!response.ok || !body.video) throw new Error(body.error ?? "The video record could not be created.");
+
+      const duration = Math.round(body.video.duration_seconds);
+      onComplete({
+        id: body.video.id,
+        title: body.video.title,
+        thumbnail: URL.createObjectURL(selectedFile),
+        duration: `00:${String(duration).padStart(2, "0")}`,
+        status: "processing",
+        views: "—",
+        placements: [],
+        versions: [],
+      });
+      setPhase("complete");
+      toast("Video uploaded. Analysis is queued and its status will update automatically.");
+    } catch (nextError) {
+      if (uploaded) await client.storage.from("videos").remove([uploaded.objectPath]);
+      setPhase("ready");
+      setError(nextError instanceof Error ? nextError.message : "The upload could not be completed.");
+    }
+  };
+
+  const durationLabel = metadata ? `00:${String(Math.round(metadata.durationSeconds)).padStart(2, "0")}` : "";
+  const isBusy = phase === "validating" || phase === "uploading" || phase === "creating";
+
+  return <Modal open={open} onClose={close} title="Upload a video"><div className="px-7 pb-7"><input id={inputId} type="file" accept="video/mp4,video/quicktime,.mp4,.mov" className="sr-only" onChange={(event) => void selectFile(event.target.files?.[0])} />{phase === "idle" || phase === "validating" ? <><label htmlFor={inputId} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void selectFile(event.dataTransfer.files?.[0]); }} className={`frame-grow relative mt-6 flex w-full cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed p-10 text-center transition ${dragging ? "border-accent bg-accent-soft/40" : "border-line bg-paper2/60 hover:bg-paper2"}`}><FrameCorners className="text-accent" /><span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink text-paper">{phase === "validating" ? <Loader2 size={20} className="animate-spin" /> : <Upload size={20} />}</span><span className="text-sm font-bold">{phase === "validating" ? "Checking your video…" : "Drop your vertical video here"}</span><span className="text-xs leading-relaxed text-inksoft">MP4 or MOV · 9:16 · 15–60 seconds · max 500 MB<br />Stored in your private bucket.</span></label><div className="mt-4 grid grid-cols-3 gap-2 text-[11px] text-inksoft"><span>Vertical 1080×1920</span><span>15–60s runtime</span><span>Private by default</span></div></> : <div className="mt-6"><div className="flex items-center gap-3"><div className="striped h-16 w-12 rounded-md bg-ink" /><div className="min-w-0 flex-1"><div className="truncate text-sm font-bold">{selectedFile?.name}</div><div className="text-xs text-inksoft">{selectedFile ? `${(selectedFile.size / (1024 * 1024)).toFixed(1)} MB` : ""} · {metadata ? `${metadata.width}×${metadata.height}` : ""} · {durationLabel}</div></div>{phase === "uploading" ? <span className="text-xs font-bold text-accent">{progress}%</span> : null}</div><label className="mt-5 block text-xs font-bold text-inksoft">Video title<input value={title} disabled={isBusy || phase === "complete"} onChange={(event) => setTitle(event.target.value)} maxLength={160} className="mt-1.5 h-10 w-full rounded-md border border-line bg-white px-3 text-sm font-medium text-ink outline-none transition focus:border-accent disabled:cursor-not-allowed disabled:bg-paper2" /></label>{phase === "uploading" || phase === "creating" ? <><div className="mt-5 h-1.5 overflow-hidden rounded-full bg-paper2"><div className="h-full rounded-full bg-accent transition-all duration-200" style={{ width: `${phase === "creating" ? 100 : progress}%` }} /></div><div className="mt-4 flex items-center gap-3 text-sm"><Loader2 size={16} className="animate-spin text-accent" /><span>{phase === "creating" ? "Creating the video record…" : "Uploading securely to private storage…"}</span></div></> : null}{phase === "complete" ? <div className="mt-5 flex items-center gap-3 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-900"><Check size={16} /><span>Your video is queued for analysis.</span></div> : null}{phase === "ready" ? <div className="mt-6 flex gap-3"><FramrButton variant="ghost" className="flex-1" onClick={reset}>Choose another</FramrButton><FramrButton className="flex-1" onClick={() => void upload()} disabled={!title.trim()}>Upload video <Upload size={16} /></FramrButton></div> : null}{phase === "complete" ? <FramrButton className="mt-6 w-full" onClick={close}>View video status <ArrowRight size={16} /></FramrButton> : null}</div>}{error ? <p role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p> : null}</div></Modal>;
+}
 export function ProductModal({ open, onClose, onSave }: { open: boolean; onClose: () => void; onSave: (asset: ProductAsset) => void }) {
   const [name, setName] = useState(""); const [brand, setBrand] = useState(""); const [preview, setPreview] = useState(false);
   const save = () => { const asset = { id: `asset-${Date.now()}`, name: name || "New product", brand: brand || "Your brand", category: "Kitchen appliances", image: IMG.aurisProduct, frame: IMG.auris }; onSave(asset); setName(""); setBrand(""); setPreview(false); onClose(); toast(`“${asset.name}” saved as a reusable product asset.`); };

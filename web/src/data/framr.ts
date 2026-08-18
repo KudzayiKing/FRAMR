@@ -42,8 +42,7 @@ export type Video = {
   title: string;
   thumbnail: string;
   duration: string;
-  status: "ready" | "processing";
-  progress?: number;
+  status: "uploading" | "processing" | "ready" | "failed";
   views: string;
   placements: Placement[];
   versions: Version[];
@@ -139,7 +138,6 @@ export const initialVideos: Video[] = [
     thumbnail: IMG.pancakes,
     duration: "00:22",
     status: "processing",
-    progress: 68,
     views: "—",
     placements: [],
     versions: [],
