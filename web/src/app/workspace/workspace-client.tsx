@@ -294,15 +294,31 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     if (!generationJob?.id || !isSupabaseConfigured) return;
     const client = getBrowserClient();
     if (!client) return;
+    const jobId = generationJob.id;
+    let cancelled = false;
+    const syncGeneration = async () => {
+      const { data, error } = await client
+        .from("generation_jobs")
+        .select("id,status,version_id,error,cost_cents")
+        .eq("id", jobId)
+        .maybeSingle();
+      if (cancelled || error || !data) return;
+      const row = data as GenerationJob;
+      setGenerationJob((current) => current?.id === row.id ? { ...current, ...row } : current);
+      if (row.status === "complete" || row.status === "failed") void loadCreatorVideos();
+    };
+    void syncGeneration();
+    const interval = window.setInterval(() => { void syncGeneration(); }, 5_000);
     const channel = client
-      .channel(`framr-generation-${generationJob.id}`)
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "generation_jobs", filter: `id=eq.${generationJob.id}` }, (event) => {
-        const row = event.new as GenerationJob;
-        setGenerationJob((current) => current?.id === row.id ? { ...current, ...row } : current);
-      })
+      .channel(`framr-generation-${jobId}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "generation_jobs", filter: `id=eq.${jobId}` }, () => { void syncGeneration(); })
       .subscribe();
-    return () => { void client.removeChannel(channel); };
-  }, [generationJob?.id]);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      void client.removeChannel(channel);
+    };
+  }, [generationJob?.id, loadCreatorVideos]);
 
   const queueGeneration = async (productId: string) => {
     const placementId = selectedVideo?.placements[0]?.id;
@@ -345,7 +361,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     onUpload: () => setModal("upload"),
     onProduct: () => setModal("product"),
     onCampaign: () => setModal("campaign"),
-    onGenerate: () => setModal("generate"),
+    onGenerate: () => { setGenerationJob(null); setModal("generate"); },
     onExport: async (versionId: string, label: string) => {
       setExportLabel(label);
       if (versionId.startsWith("source-")) { toast.error("The source video is protected. Export a generated version instead."); return; }
