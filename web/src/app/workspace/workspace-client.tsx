@@ -27,10 +27,12 @@ import { Toaster } from "@/components/ui/sonner";
 import { FramrMark } from "@/components/framr/FramrMark";
 import { FramrButton, Chip } from "@/components/framr/FramrPrimitives";
 import { AdvertiserWorkspace, CreatorWorkspace } from "@/components/framr/WorkspaceViews";
+import { FrameRunModal } from "@/components/framr/FrameRunModal";
+import { AnalysisProgressModal } from "@/components/framr/AnalysisProgressModal";
+import { MaskRefinementModal } from "@/components/framr/MaskRefinementModal";
 import {
   CampaignModal,
   ExportModal,
-  GenerationModal,
   ProductModal,
   ReserveModal,
   UploadVideoModal,
@@ -48,13 +50,31 @@ import {
   type Video,
 } from "@/data/framr";
 import { signOut } from "@/lib/auth";
-import type { GenerationStatus } from "@/services/generation/types";
 import { getBrowserClient, isSupabaseConfigured } from "@/lib/supabase-browser";
 
 export type Role = "creator" | "advertiser";
 type WorkspaceProps = { role: Role; onExit: () => void; onSignOut: () => void };
 type GenerationProduct = { id: string; name: string; brand: string | null; image: string };
-type GenerationJob = { id: string; status: GenerationStatus; version_id: string | null; error: string | null; cost_cents: number | null };
+type PlacementTarget = {
+  id: string;
+  placement_id: string;
+  start_frame: number;
+  end_frame: number;
+  seed_frame: number;
+  seed_mask_key: string | null;
+  manual_revision: number;
+  status: string;
+};
+type PlacementRunStatus = "queued" | "running" | "needs_review" | "ready" | "failed" | "canceled";
+type PlacementRun = {
+  id: string;
+  status: PlacementRunStatus;
+  version_id: string | null;
+  error: string | null;
+  cost_cents: number | null;
+  progress: number;
+  current_stage: string | null;
+};
 type NavItem = { id: string; label: string; icon: typeof LayoutGrid };
 
 const creatorNav: NavItem[] = [
@@ -134,16 +154,22 @@ function toPlacement(row: PersistedPlacementRow): Placement {
   };
 }
 
+const privateUrlCache = new Map<string, string>();
+
 async function resolvePrivateUrl(client: NonNullable<ReturnType<typeof getBrowserClient>>, key: string | null, fallback: string) {
   if (!key) return fallback;
+  const cached = privateUrlCache.get(key);
+  if (cached) return cached;
   const [bucket, ...pathParts] = key.split("/");
   const objectPath = pathParts.join("/");
-  if (!["thumbnails", "products", "videos", "generated"].includes(bucket) || !objectPath) return fallback;
+  if (!["thumbnails", "products", "videos", "generated", "artifacts"].includes(bucket) || !objectPath) return fallback;
   const [ownerId, fileName] = pathParts;
   const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ownerId ?? "");
   if (!isUuid || !fileName) return fallback;
   const { data, error } = await client.storage.from(bucket).createSignedUrl(objectPath, 60 * 60);
-  return !error && data?.signedUrl ? data.signedUrl : fallback;
+  if (error || !data?.signedUrl) return fallback;
+  privateUrlCache.set(key, data.signedUrl);
+  return data.signedUrl;
 }
 
 function formatDuration(seconds: number | null) {
@@ -159,12 +185,16 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
   const [videos, setVideos] = useState<Video[]>(() => isSupabaseConfigured ? [] : initialVideos);
   const [assets, setAssets] = useState<ProductAsset[]>(() => isSupabaseConfigured ? [] : initialAssets);
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns);
-  const [modal, setModal] = useState<"upload" | "product" | "campaign" | "generate" | "export" | null>(null);
+  const [modal, setModal] = useState<"upload" | "analysis" | "product" | "campaign" | "mask" | "generate" | "export" | null>(null);
   const [reserve, setReserve] = useState<MarketplaceListing | null>(null);
   const [selectedVideoId, setSelectedVideoId] = useState("v1");
   const [exportLabel, setExportLabel] = useState("Auris Model A");
   const [generationProducts, setGenerationProducts] = useState<GenerationProduct[]>([]);
-  const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
+  const [selectedPlacementId, setSelectedPlacementId] = useState<string | null>(null);
+  const [selectedTarget, setSelectedTarget] = useState<PlacementTarget | null>(null);
+  const [placementRun, setPlacementRun] = useState<PlacementRun | null>(null);
+  const [pendingProductId, setPendingProductId] = useState<string | null>(null);
+  const [pendingPlacementVideoId, setPendingPlacementVideoId] = useState<string | null>(null);
 
   const loadCreatorVideos = useCallback(async () => {
     const client = getBrowserClient();
@@ -210,13 +240,13 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       const videoId = videoByPlacement.get(row.placement_id);
       if (!videoId || row.status !== "ready") continue;
       const current = versionsByVideo.get(videoId) ?? [];
-      const image = await resolvePrivateUrl(client, row.thumbnail_key, IMG.original);
+      const image = await resolvePrivateUrl(client, row.thumbnail_key, "");
       const videoUrl = await resolvePrivateUrl(client, row.video_key, "");
       current.push({ id: row.id, label: row.label, brand: row.brand ?? "Product", image, active: row.is_active, videoUrl: videoUrl || undefined });
       versionsByVideo.set(videoId, current);
     }
     const hydrated = await Promise.all(((videoResponse.data ?? []) as PersistedVideoRow[]).map(async (row) => {
-      const thumbnail = await resolvePrivateUrl(client, row.thumbnail_key, IMG.original);
+      const thumbnail = await resolvePrivateUrl(client, row.thumbnail_key, "");
       const sourceVideoUrl = await resolvePrivateUrl(client, row.storage_key, "");
       const source: Version = { id: `source-${row.id}`, label: "Original", brand: "Source", image: thumbnail, active: true, source: true, videoUrl: sourceVideoUrl || undefined };
       return {
@@ -233,6 +263,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     }));
     setVideos(hydrated);
     setSelectedVideoId((current) => hydrated.some((video) => video.id === current) ? current : hydrated[0]?.id ?? "");
+
   }, []);
 
   const loadGenerationProducts = useCallback(async () => {
@@ -250,6 +281,20 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     })));
     setGenerationProducts(hydrated);
     setAssets(hydrated.map((product) => ({ id: product.id, name: product.name, brand: product.brand ?? "Your brand", category: "Product", image: product.image, frame: product.image })));
+  }, []);
+
+  const startPlacementRun = useCallback(async (placementId: string, target: PlacementTarget, productId: string) => {
+    const response = await fetch("/api/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ placementId, productId, targetId: target.id, idempotencyKey: crypto.randomUUID() }),
+    });
+    const body = await response.json().catch(() => null) as { run?: PlacementRun; error?: string; reused?: boolean } | null;
+    if (!response.ok || !body?.run) {
+      toast.error(body?.error ?? "We couldn’t create that preview.");
+      return;
+    }
+    setPlacementRun(body.run);
   }, []);
 
   useEffect(() => {
@@ -291,51 +336,122 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
   }, [loadCreatorVideos, loadGenerationProducts, role]);
 
   useEffect(() => {
-    if (!generationJob?.id || !isSupabaseConfigured) return;
+    if (!selectedTarget?.id || !isSupabaseConfigured) return;
     const client = getBrowserClient();
     if (!client) return;
-    const jobId = generationJob.id;
+    const targetId = selectedTarget.id;
     let cancelled = false;
-    const syncGeneration = async () => {
+    const syncTarget = async () => {
       const { data, error } = await client
-        .from("generation_jobs")
-        .select("id,status,version_id,error,cost_cents")
-        .eq("id", jobId)
+        .from("placement_targets")
+        .select("id,placement_id,start_frame,end_frame,seed_frame,seed_mask_key,manual_revision,status")
+        .eq("id", targetId)
         .maybeSingle();
       if (cancelled || error || !data) return;
-      const row = data as GenerationJob;
-      setGenerationJob((current) => current?.id === row.id ? { ...current, ...row } : current);
-      if (row.status === "complete" || row.status === "failed") void loadCreatorVideos();
+      const next = data as PlacementTarget;
+      setSelectedTarget((current) => current?.id === next.id ? next : current);
+      if (next.status === "ready") {
+        void loadCreatorVideos();
+        if (pendingProductId && selectedPlacementId === next.placement_id) {
+          const productId = pendingProductId;
+          setPendingProductId(null);
+          void startPlacementRun(next.placement_id, next, productId);
+        }
+      } else if (next.status === "needs_review" || next.status === "failed") {
+        setPendingProductId(null);
+        void loadCreatorVideos();
+      }
     };
-    void syncGeneration();
-    const interval = window.setInterval(() => { void syncGeneration(); }, 5_000);
+    void syncTarget();
+    const interval = window.setInterval(() => { void syncTarget(); }, 4_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [selectedTarget?.id, loadCreatorVideos, pendingProductId, selectedPlacementId, startPlacementRun]);
+
+  useEffect(() => {
+    if (!placementRun?.id || !isSupabaseConfigured || ["ready", "needs_review", "failed", "canceled"].includes(placementRun.status)) return;
+    const client = getBrowserClient();
+    if (!client) return;
+    const runId = placementRun.id;
+    let cancelled = false;
+    const syncRun = async () => {
+      const { data, error } = await client
+        .from("placement_runs")
+        .select("id,status,version_id,error,estimated_cost_cents,progress,current_stage")
+        .eq("id", runId)
+        .maybeSingle();
+      if (cancelled || error || !data) return;
+      const row = data as Omit<PlacementRun, "cost_cents"> & { estimated_cost_cents: number | null };
+      const next: PlacementRun = { ...row, cost_cents: row.estimated_cost_cents };
+      setPlacementRun((current) => current?.id === next.id ? next : current);
+      if (["ready", "needs_review", "failed", "canceled"].includes(next.status)) void loadCreatorVideos();
+    };
+    void syncRun();
+    const interval = window.setInterval(() => { void syncRun(); }, 5_000);
     const channel = client
-      .channel(`framr-generation-${jobId}`)
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "generation_jobs", filter: `id=eq.${jobId}` }, () => { void syncGeneration(); })
+      .channel(`framr-placement-run-${runId}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "placement_runs", filter: `id=eq.${runId}` }, () => { void syncRun(); })
       .subscribe();
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       void client.removeChannel(channel);
     };
-  }, [generationJob?.id, loadCreatorVideos]);
+  }, [placementRun?.id, loadCreatorVideos]);
 
   const queueGeneration = async (productId: string) => {
-    const placementId = selectedVideo?.placements[0]?.id;
-    if (!placementId) { toast.error("Select a detected placement before creating a version."); return; }
-    const response = await fetch("/api/generations", {
+    const placementId = selectedPlacementId;
+    if (!placementId || !selectedTarget || selectedTarget.placement_id !== placementId) {
+      toast.error("Choose an item first.");
+      return;
+    }
+    if (selectedTarget.status !== "ready") {
+      setPendingProductId(productId);
+      return;
+    }
+    await startPlacementRun(placementId, selectedTarget, productId);
+  };
+
+  const prepareAutomaticTarget = async (placementId: string) => {
+    setSelectedPlacementId(placementId);
+    setSelectedTarget(null);
+    setPlacementRun(null);
+    setPendingProductId(null);
+    const response = await fetch("/api/placement-targets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ placementId, productId }),
+      body: JSON.stringify({ placementId }),
     });
-    const body = await response.json().catch(() => null) as { generation?: GenerationJob; error?: string } | null;
-    if (!response.ok || !body?.generation) { toast.error(body?.error ?? "Generation could not be queued."); return; }
-    setGenerationJob(body.generation);
+    const body = await response.json().catch(() => null) as { target?: PlacementTarget; error?: string; reused?: boolean } | null;
+    if (!response.ok || !body?.target) {
+      toast.error(body?.error ?? "FRAMR could not start automatic object tracking.");
+      return;
+    }
+    setSelectedTarget(body.target);
+    setPage("versions");
+    setModal("generate");
+    toast(body.reused ? "FRAMR is continuing to map this object." : "FRAMR is mapping this object through your video.");
+  };
+
+  const cancelPlacementRun = async () => {
+    if (!placementRun) return;
+    const response = await fetch("/api/generations", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId: placementRun.id, action: "cancel" }),
+    });
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) { toast.error(body?.error ?? "The placement run could not be canceled."); return; }
+    setPlacementRun((current) => current ? { ...current, status: "canceled", error: "Canceled by creator." } : current);
+    await loadCreatorVideos();
   };
 
   const nav = role === "creator" ? creatorNav : advertiserNav;
   const title = nav.find((item) => item.id === page)?.label ?? page;
   const selectedVideo = videos.find((video) => video.id === selectedVideoId) ?? videos[0] ?? null;
+  const selectedPlacement = selectedVideo?.placements.find((placement) => placement.id === selectedPlacementId) ?? null;
 
   const updateVersion = () => {
     setPage("versions");
@@ -344,8 +460,20 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
   const addVideo = (video: Video) => {
     setVideos((current) => current.some((item) => item.id === video.id) ? current : [video, ...current]);
     setSelectedVideoId(video.id);
-    setPage("videos");
+    setPendingPlacementVideoId(video.id);
+    setModal("analysis");
   };
+
+  const pendingAnalysisVideo = videos.find((video) => video.id === pendingPlacementVideoId) ?? null;
+
+  const finishAnalysis = useCallback((videoId: string) => {
+    setSelectedVideoId(videoId);
+    setPendingPlacementVideoId(null);
+    setModal(null);
+    setPage("placements");
+    void loadCreatorVideos();
+    toast.success("Analysis complete. Your placement workspace is ready to review.");
+  }, [loadCreatorVideos]);
 
   const contentProps = {
     page,
@@ -361,7 +489,10 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     onUpload: () => setModal("upload"),
     onProduct: () => setModal("product"),
     onCampaign: () => setModal("campaign"),
-    onGenerate: () => { setGenerationJob(null); setModal("generate"); },
+    onGenerate: (placementId?: string) => {
+      if (!placementId) { toast.error("Choose a detected object from the placements list before preparing a placement preview."); return; }
+      void prepareAutomaticTarget(placementId);
+    },
     onExport: async (versionId: string, label: string) => {
       setExportLabel(label);
       if (versionId.startsWith("source-")) { toast.error("The source video is protected. Export a generated version instead."); return; }
@@ -415,15 +546,33 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       <main className="mx-auto w-full max-w-[1400px] p-5 sm:p-8">{role === "creator" ? <CreatorWorkspace {...contentProps} /> : <AdvertiserWorkspace {...contentProps} />}</main>
     </div>
     <UploadVideoModal open={modal === "upload"} onClose={() => setModal(null)} onComplete={addVideo} />
+    <AnalysisProgressModal
+      key={pendingPlacementVideoId ?? "no-pending-upload"}
+      open={modal === "analysis"}
+      video={pendingAnalysisVideo}
+      onReady={finishAnalysis}
+      onClose={() => { setModal(null); setPendingPlacementVideoId(null); setPage("videos"); }}
+    />
     <ProductModal open={modal === "product"} onClose={() => setModal(null)} onSave={(asset) => { setAssets((items) => [asset, ...items]); void loadGenerationProducts(); }} />
     <CampaignModal open={modal === "campaign"} onClose={() => setModal(null)} onCreate={(campaign) => setCampaigns((items) => [campaign, ...items])} />
-    <GenerationModal
+    <MaskRefinementModal
+      open={modal === "mask"}
+      onClose={() => setModal(null)}
+      video={selectedVideo}
+      placement={selectedPlacement}
+      onPrepared={(target) => { setSelectedTarget(target); setPage("versions"); setModal("generate"); toast("FRAMR is re-tracking your refined mask."); }}
+    />
+    <FrameRunModal
       open={modal === "generate"}
       onClose={() => setModal(null)}
       video={selectedVideo}
+      placement={selectedPlacement}
       products={generationProducts}
-      generation={generationJob}
+      target={selectedTarget}
+      run={placementRun}
+      preparing={Boolean(pendingProductId)}
       onStart={queueGeneration}
+      onCancel={cancelPlacementRun}
       onFinish={updateVersion}
     />
     <ExportModal open={modal === "export"} onClose={() => setModal(null)} label={exportLabel} />

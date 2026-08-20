@@ -21,7 +21,15 @@ def build_pipeline(settings: Settings) -> AnalysisPipeline:
         analyzer = MockAnalyzer()
     else:
         from .live import LiveAnalyzer
-        analyzer = LiveAnalyzer(model_name=settings.yolo_model, tracker_config=settings.tracker_config)
+        analyzer = LiveAnalyzer(
+            model_name=settings.yolo_model,
+            tracker_config=settings.tracker_config,
+            open_vocabulary_enabled=settings.open_vocabulary_enabled,
+            open_vocabulary_model=settings.open_vocabulary_model,
+            open_vocabulary_confidence=settings.open_vocabulary_confidence,
+            open_vocabulary_samples=settings.open_vocabulary_samples,
+            open_vocabulary_device=settings.open_vocabulary_device,
+        )
     return AnalysisPipeline(
         settings=settings,
         repository=AnalysisRepository(client),

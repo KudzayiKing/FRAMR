@@ -33,6 +33,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reveal { animation: enter .7s cubic-bezier(.23,1,.32,1) both; }
 .modal-backdrop { background: rgba(18,17,16,.64); backdrop-filter: blur(3px); }
 .nav-item { display: flex; width: 100%; align-items: center; gap: .75rem; border-radius: 8px; padding: .5rem .75rem; color: #5b564c; font-size: .8125rem; font-weight: 500; text-align: left; transition: background-color .15s, color .15s; }.nav-item:hover { background: #f2efe8; color: #171512; }.nav-item--active { background: #171512; color: #faf9f6; }.nav-item--active svg { color: #e4572e; }
+.framr-video-placeholder { background-color: #121110; background-image: linear-gradient(rgba(194, 190, 183, .18) 1px, transparent 1px), linear-gradient(90deg, rgba(194, 190, 183, .18) 1px, transparent 1px); background-size: 22px 22px; }
 .scanline { position: absolute; left: 4%; right: 4%; height: 2px; background: linear-gradient(90deg, transparent, #e4572e, transparent); box-shadow: 0 0 18px #e4572e88; animation: scan-y 2.4s ease-in-out infinite; }
 .striped { background-image: repeating-linear-gradient(45deg,#e4572e 0 6px,#f6cdbb 6px 12px); background-size: 24px 24px; animation: stripe-move 1s linear infinite; }
 .compare-before { clip-path: inset(0 50% 0 0); }

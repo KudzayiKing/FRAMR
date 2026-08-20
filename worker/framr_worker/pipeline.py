@@ -43,12 +43,17 @@ class AnalysisPipeline:
                 work_dir = Path(directory)
                 source_path = work_dir / f"source{suffix}"
                 thumbnail_path = work_dir / "thumbnail.jpg"
+                self.repository.update_progress(job, "preparing_video", 8)
                 self.storage.download_source_video(job.storage_key, source_path)
+                self.repository.update_progress(job, "reading_video", 20)
                 metadata = self.media.inspect(source_path)
                 self.media.create_thumbnail(source_path, thumbnail_path, metadata.duration_seconds)
-                result = self.analyzer.analyze(job, metadata, source_path)
-                self.repository.replace_analysis(job, result)
                 thumbnail_key = self.storage.upload_thumbnail(job.owner_id, job.id, thumbnail_path)
+                self.repository.update_progress(job, "finding_items", 35, thumbnail_key)
+                result = self.analyzer.analyze(job, metadata, source_path)
+                self.repository.update_progress(job, "organizing_items", 82)
+                self.repository.replace_analysis(job, result)
+                self.repository.update_progress(job, "finalizing", 95)
                 self.repository.mark_ready(job, metadata, thumbnail_key)
                 logger.info("analysis_complete video_id=%s scenes=%s", job.id, len(result.scenes))
         except Exception as error:

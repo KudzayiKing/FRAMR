@@ -29,21 +29,26 @@ class MediaProcessor:
             [
                 self.ffprobe_bin,
                 "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name,width,height,avg_frame_rate:format=duration",
+                                "-show_entries",
+                "stream=codec_type,codec_name,width,height,avg_frame_rate:format=duration",
                 "-of", "json",
                 str(source_path),
             ]
         )
         payload = json.loads(completed.stdout)
-        stream = (payload.get("streams") or [{}])[0]
+        streams = payload.get("streams") or []
+        stream = next((item for item in streams if item.get("codec_type") == "video"), {})
         source_format = payload.get("format") or {}
+        frame_rate = self._parse_frame_rate(str(stream.get("avg_frame_rate") or "0/0"))
+        duration_seconds = float(source_format.get("duration") or 0)
         metadata = VideoMetadata(
-            duration_seconds=float(source_format.get("duration") or 0),
+            duration_seconds=duration_seconds,
             width=int(stream.get("width") or 0),
             height=int(stream.get("height") or 0),
             codec_name=str(stream.get("codec_name") or ""),
-            frame_rate=self._parse_frame_rate(str(stream.get("avg_frame_rate") or "0/0")),
+            frame_rate=frame_rate,
+            frame_count=max(1, round(duration_seconds * frame_rate)),
+            has_audio=any(item.get("codec_type") == "audio" for item in streams),
         )
         self._validate_metadata(metadata)
         return metadata

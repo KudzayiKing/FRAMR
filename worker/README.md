@@ -37,3 +37,17 @@ Set `FRAMR_ANALYSIS=live` to use Ultralytics `model.track(..., persist=True, tra
 ## Deployment boundary
 
 A production worker needs an always-on host with Python, FFmpeg/FFprobe, and computer-vision dependencies. It is intentionally not auto-started by local Next.js development. The implementation is ready to run once the migration, service-role secret, runtime dependencies, and persistent host are in place.
+
+## Frame-preserving placement pipeline
+
+Migration `0008_frame_preserving_foundation.sql` introduces an additive, durable pipeline for commercial layers. It does not alter historical Lucy outputs. New `placement_runs` are idempotent, contain an immutable source/target/product configuration, and advance through leased stage rows in `placement_job_steps`.
+
+```bash
+cd worker
+set -a; source .env; set +a
+.venv/bin/python -m framr_worker.frame_cli --once
+```
+
+Run the command without `--once` only from a durable worker host after the migration has been applied. The initial development adapters write a private source/target manifest and then stop at the first unavailable model boundary with `needs_review`. They intentionally do **not** generate pixels, call Decart Lucy, call a paid image model, or fall back to full-video generation. A verified segmentation provider and localized image editor must be attached before a placement can become renderable.
+
+The frame worker uses the same worker-only service-role environment as analysis. It must never run in the browser and must not be started before migration `0008` is applied.

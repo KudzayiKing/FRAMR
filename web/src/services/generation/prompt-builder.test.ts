@@ -8,3 +8,7 @@ const prompt = buildPlacementReplacementPrompt(
 if (!prompt.includes("Rice cooker") || !prompt.includes("00:07 to 00:19") || !prompt.includes("Auris Model A")) {
   throw new Error("Prompt builder did not preserve required placement and product context.");
 }
+
+if (prompt.length > 600) {
+  throw new Error("Prompt builder exceeded the safe provider-bound prompt budget.");
+}

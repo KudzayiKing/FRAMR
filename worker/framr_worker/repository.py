@@ -15,6 +15,15 @@ class AnalysisRepository:
         rows = response.data or []
         return VideoJob.from_row(rows[0]) if rows else None
 
+    def update_progress(self, job: VideoJob, stage: str, progress: int, thumbnail_key: str | None = None) -> None:
+        values: dict[str, Any] = {
+            "analysis_stage": stage,
+            "analysis_progress": max(0, min(100, progress)),
+        }
+        if thumbnail_key is not None:
+            values["thumbnail_key"] = thumbnail_key
+        self.client.table("videos").update(values).eq("id", job.id).execute()
+
     def replace_analysis(self, job: VideoJob, result: AnalysisResult) -> None:
         self.client.table("placements").delete().eq("video_id", job.id).execute()
         self.client.table("video_scenes").delete().eq("video_id", job.id).execute()
@@ -68,13 +77,18 @@ class AnalysisRepository:
                 "duration_seconds": metadata.duration_seconds,
                 "width": metadata.width,
                 "height": metadata.height,
+                "frame_rate": metadata.frame_rate,
+                "frame_count": metadata.frame_count,
+                "has_audio": metadata.has_audio,
                 "thumbnail_key": thumbnail_key,
                 "processing_error": None,
+                "analysis_stage": "complete",
+                "analysis_progress": 100,
                 "processed_at": datetime.now(UTC).isoformat(),
             }
         ).eq("id", job.id).execute()
 
     def mark_failed(self, job: VideoJob, message: str) -> None:
         self.client.table("videos").update(
-            {"status": "failed", "processing_error": message[:500]}
+            {"status": "failed", "processing_error": message[:500], "analysis_stage": "failed"}
         ).eq("id", job.id).execute()

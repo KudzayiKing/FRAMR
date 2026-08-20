@@ -1,10 +1,19 @@
 import type { GenerationHandle, GenerationStatus, ProviderSubmission, VideoGenerationProvider } from "./types";
 
-type DecartJobResponse = { job_id?: string; id?: string; status?: string; error?: string; message?: string };
+type DecartJobResponse = { job_id?: string; id?: string; status?: string; error?: string; message?: string; detail?: unknown };
 
 function providerError(status: number, body: unknown) {
   const value = body && typeof body === "object" ? body as Record<string, unknown> : {};
-  const message = typeof value.message === "string" ? value.message : typeof value.error === "string" ? value.error : "The generation provider rejected this request.";
+  const validationDetail = typeof value.detail === "string"
+    ? value.detail
+    : Array.isArray(value.detail)
+      ? value.detail.map((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).msg === "string" ? (item as Record<string, unknown>).msg : null).filter(Boolean).join("; ")
+      : "";
+  const message = typeof value.message === "string"
+    ? value.message
+    : typeof value.error === "string"
+      ? value.error
+      : validationDetail || "The generation provider rejected this request.";
   return new Error(`Decart request failed (${status}): ${message.slice(0, 240)}`);
 }
 

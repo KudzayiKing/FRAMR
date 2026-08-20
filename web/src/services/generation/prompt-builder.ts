@@ -32,21 +32,18 @@ export function buildPlacementReplacementPrompt(
   product: ProductPromptContext,
 ) {
   const objectLabel = clean(placement.objectLabel, "detected object", 120);
-  const category = clean(placement.category, "product", 100);
-  const productName = clean(product.name, "replacement product", 140);
-  const brand = clean(product.brand, "", 100);
-  const description = clean(product.description, "", 280);
+  const productName = clean(product.name, "replacement product", 80);
+  const brand = clean(product.brand, "", 60);
   const productIdentity = brand ? `${brand} ${productName}` : productName;
   const timeRange = `${formatTimestamp(placement.startSeconds)} to ${formatTimestamp(placement.endSeconds)}`;
 
-  const lines = [
-    "Edit the supplied portrait source video as a realistic product replacement.",
-    `Replace only the ${objectLabel} (${category}) that is visible approximately from ${timeRange} with the reference product: ${productIdentity}.`,
-    "Use the reference image as the source of truth for the product's shape, materials, colors, branding, and proportions.",
-    "Preserve the original people, hands, background, camera movement, framing, lighting direction, shadows, reflections, perspective, occlusion, and natural motion.",
-    "Keep the rest of the video unchanged. Do not add captions, watermarks, new objects, or branding outside the replacement product.",
-    "Ensure the replacement is stable across frames and blends naturally into the original scene.",
-  ];
-  if (description) lines.splice(3, 0, `Product context: ${description}.`);
-  return lines.join(" ");
+  // Lucy has a strict prompt token limit. Keep the information that governs a
+  // product swap, but omit prose the reference image and source clip already
+  // communicate.
+  return [
+    `Replace only the ${objectLabel} from ${timeRange} with ${productIdentity} from the reference image.`,
+    "Match its shape, material, color, branding, scale, and visible details.",
+    "Keep people, hands, background, camera, lighting, shadows, reflections, perspective, and motion unchanged.",
+    "No captions, watermarks, or extra objects.",
+  ].join(" ");
 }

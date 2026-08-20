@@ -39,6 +39,8 @@ class VideoMetadata:
     height: int
     codec_name: str
     frame_rate: float
+    frame_count: int = 0
+    has_audio: bool = False
 
 
 @dataclass(frozen=True)

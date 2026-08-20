@@ -115,7 +115,7 @@ export function UploadVideoModal({ open, onClose, onComplete }: { open: boolean;
       onComplete({
         id: body.video.id,
         title: body.video.title,
-        thumbnail: IMG.original,
+        thumbnail: "",
         duration: `00:${String(duration).padStart(2, "0")}`,
         status: "processing",
         views: "—",
@@ -137,41 +137,77 @@ export function UploadVideoModal({ open, onClose, onComplete }: { open: boolean;
   return <Modal open={open} onClose={close} title="Upload a video"><div className="px-7 pb-7"><input id={inputId} type="file" accept="video/mp4,video/quicktime,.mp4,.mov" className="sr-only" onChange={(event) => void selectFile(event.target.files?.[0])} />{phase === "idle" || phase === "validating" ? <><label htmlFor={inputId} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void selectFile(event.dataTransfer.files?.[0]); }} className={`frame-grow relative mt-6 flex w-full cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed p-10 text-center transition ${dragging ? "border-accent bg-accent-soft/40" : "border-line bg-paper2/60 hover:bg-paper2"}`}><FrameCorners className="text-accent" /><span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink text-paper">{phase === "validating" ? <Loader2 size={20} className="animate-spin" /> : <Upload size={20} />}</span><span className="text-sm font-bold">{phase === "validating" ? "Checking your video…" : "Drop your vertical video here"}</span><span className="text-xs leading-relaxed text-inksoft">MP4 or MOV · 9:16 · 15–60 seconds · max 500 MB<br />Stored in your private bucket.</span></label><div className="mt-4 grid grid-cols-3 gap-2 text-[11px] text-inksoft"><span>Vertical 1080×1920</span><span>15–60s runtime</span><span>Private by default</span></div></> : <div className="mt-6"><div className="flex items-center gap-3"><div className="striped h-16 w-12 rounded-md bg-ink" /><div className="min-w-0 flex-1"><div className="truncate text-sm font-bold">{selectedFile?.name}</div><div className="text-xs text-inksoft">{selectedFile ? `${(selectedFile.size / (1024 * 1024)).toFixed(1)} MB` : ""} · {metadata ? `${metadata.width}×${metadata.height}` : ""} · {durationLabel}</div></div>{phase === "uploading" ? <span className="text-xs font-bold text-accent">{progress}%</span> : null}</div><label className="mt-5 block text-xs font-bold text-inksoft">Video title<input value={title} disabled={isBusy || phase === "complete"} onChange={(event) => setTitle(event.target.value)} maxLength={160} className="mt-1.5 h-10 w-full rounded-md border border-line bg-white px-3 text-sm font-medium text-ink outline-none transition focus:border-accent disabled:cursor-not-allowed disabled:bg-paper2" /></label>{phase === "uploading" || phase === "creating" ? <><div className="mt-5 h-1.5 overflow-hidden rounded-full bg-paper2"><div className="h-full rounded-full bg-accent transition-all duration-200" style={{ width: `${phase === "creating" ? 100 : progress}%` }} /></div><div className="mt-4 flex items-center gap-3 text-sm"><Loader2 size={16} className="animate-spin text-accent" /><span>{phase === "creating" ? "Creating the video record…" : "Uploading securely to private storage…"}</span></div></> : null}{phase === "complete" ? <div className="mt-5 flex items-center gap-3 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-900"><Check size={16} /><span>Your video is queued for analysis.</span></div> : null}{phase === "ready" ? <div className="mt-6 flex gap-3"><FramrButton variant="ghost" className="flex-1" onClick={reset}>Choose another</FramrButton><FramrButton className="flex-1" onClick={() => void upload()} disabled={!title.trim()}>Upload video <Upload size={16} /></FramrButton></div> : null}{phase === "complete" ? <FramrButton className="mt-6 w-full" onClick={close}>View video status <ArrowRight size={16} /></FramrButton> : null}</div>}{error ? <p role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p> : null}</div></Modal>;
 }
 export function ProductModal({ open, onClose, onSave }: { open: boolean; onClose: () => void; onSave: (asset: ProductAsset) => void }) {
+  type ProductState = "closed" | "open" | "side" | "detail" | "front" | "other";
+  type ExtraReference = { id: string; state: ProductState; file: File; preview: string };
+  const stateLabels: Record<ProductState, string> = {
+    closed: "Closed / canonical view",
+    open: "Open state",
+    side: "Side / handle view",
+    detail: "Detail / label view",
+    front: "Front view",
+    other: "Other useful view",
+  };
   const [name, setName] = useState("");
   const [brand, setBrand] = useState("");
   const [description, setDescription] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [references, setReferences] = useState<ExtraReference[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const reset = () => { setName(""); setBrand(""); setDescription(""); setFile(null); if (preview) URL.revokeObjectURL(preview); setPreview(null); setSaving(false); setError(null); };
+  const reset = () => {
+    setName(""); setBrand(""); setDescription(""); setFile(null);
+    if (preview) URL.revokeObjectURL(preview);
+    references.forEach((reference) => URL.revokeObjectURL(reference.preview));
+    setPreview(null); setReferences([]); setSaving(false); setError(null);
+  };
   const close = () => { if (saving) return; reset(); onClose(); };
-  const choose = (candidate: File | undefined) => {
+  const valid = (candidate: File) => /^(image\/(jpeg|png|webp))$/.test(candidate.type) && candidate.size > 0 && candidate.size <= 10 * 1024 * 1024;
+  const choosePrimary = (candidate: File | undefined) => {
     if (!candidate) return;
-    if (!/^(image\/(jpeg|png|webp))$/.test(candidate.type) || candidate.size <= 0 || candidate.size > 10 * 1024 * 1024) { setError("Choose a JPEG, PNG, or WebP image no larger than 10 MB."); return; }
+    if (!valid(candidate)) { setError("Choose a JPEG, PNG, or WebP image no larger than 10 MB."); return; }
     if (preview) URL.revokeObjectURL(preview);
     setFile(candidate); setPreview(URL.createObjectURL(candidate)); setError(null);
   };
+  const addReferences = (candidates: FileList | null) => {
+    if (!candidates) return;
+    const files = Array.from(candidates);
+    if (references.length + files.length > 4) { setError("You can add up to four optional product-state views."); return; }
+    if (files.some((candidate) => !valid(candidate))) { setError("Additional views must be JPEG, PNG, or WebP and 10 MB or smaller."); return; }
+    setReferences((current) => [...current, ...files.map((candidate) => ({ id: crypto.randomUUID(), state: "other" as ProductState, file: candidate, preview: URL.createObjectURL(candidate) }))]);
+    setError(null);
+  };
+  const setReferenceState = (id: string, state: ProductState) => setReferences((current) => current.map((reference) => reference.id === id ? { ...reference, state } : reference));
+  const removeReference = (id: string) => setReferences((current) => {
+    const reference = current.find((candidate) => candidate.id === id);
+    if (reference) URL.revokeObjectURL(reference.preview);
+    return current.filter((candidate) => candidate.id !== id);
+  });
   const save = async () => {
     const trimmedName = name.trim();
-    if (!trimmedName || !file) { setError("Add a product name and reference image."); return; }
+    if (!trimmedName || !file) { setError("Add a product name and one clear canonical product image."); return; }
     const fallbackAsset = (id: string, image: string): ProductAsset => ({ id, name: trimmedName, brand: brand.trim() || "Your brand", category: "Product", image, frame: image });
-    if (!isSupabaseConfigured) { const image = preview ?? IMG.aurisProduct; onSave(fallbackAsset(`asset-${Date.now()}`, image)); toast(`“${trimmedName}” saved as a reusable demo product asset.`); close(); return; }
+    if (!isSupabaseConfigured) { const image = preview ?? IMG.aurisProduct; onSave(fallbackAsset(`asset-${Date.now()}`, image)); close(); return; }
     const client = getBrowserClient();
     if (!client) { setError("Product storage is unavailable."); return; }
     setSaving(true); setError(null);
     try {
       const { uploadProductImage } = await import("@/lib/product-upload");
-      const uploaded = await uploadProductImage(client, file);
-      const response = await fetch("/api/products", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: trimmedName, brand: brand.trim(), description: description.trim(), ...uploaded }) });
-      const body = await response.json().catch(() => null) as { product?: { id: string; name: string; brand: string | null }; error?: string } | null;
+      const primary = await uploadProductImage(client, file);
+      const extra = await Promise.all(references.map(async (reference) => ({ ...(await uploadProductImage(client, reference.file)), state: reference.state })));
+      const response = await fetch("/api/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmedName, brand: brand.trim(), description: description.trim(), ...primary, references: extra }),
+      });
+      const body = await response.json().catch(() => null) as { product?: { id: string; name: string; brand: string | null }; referenceCount?: number; error?: string } | null;
       if (!response.ok || !body?.product) throw new Error(body?.error ?? "The product could not be saved.");
       onSave(fallbackAsset(body.product.id, preview ?? IMG.aurisProduct));
-      toast(`“${body.product.name}” is ready as a private product reference.`);
+      toast(`${body.product.name} is ready with ${body.referenceCount ?? 1} private product view${body.referenceCount === 1 ? "" : "s"}.`);
       close();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The product could not be saved."); setSaving(false); }
   };
-  return <Modal open={open} onClose={close} title="Add a product asset" className="max-w-md"><div className="px-7 pb-7"><p className="mt-1 text-xs text-inksoft">Upload a reusable private product reference for placements and generated versions.</p><label className="frame-grow relative mt-5 flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-line bg-paper2/60 p-6 text-inksoft transition hover:bg-paper2"><FrameCorners className="text-accent" /><Image size={24} /><span className="text-xs font-semibold">{file ? file.name : "Choose product image"}</span><span className="text-[11px]">JPEG, PNG, or WebP · max 10 MB</span><input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => choose(event.target.files?.[0])} /></label>{preview && <img src={preview} alt="Product preview" className="mt-3 h-32 w-full rounded-lg border border-line object-cover" />}<div className="mt-4 grid grid-cols-2 gap-3"><label className="text-xs font-semibold">Product name<input value={name} disabled={saving} onChange={(event) => setName(event.target.value)} maxLength={160} className="mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm font-normal" placeholder="Model A rice cooker" /></label><label className="text-xs font-semibold">Brand<input value={brand} disabled={saving} onChange={(event) => setBrand(event.target.value)} maxLength={120} className="mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm font-normal" placeholder="Auris" /></label></div><label className="mt-3 block text-xs font-semibold">Description <span className="font-normal text-inksoft">(optional)</span><textarea value={description} disabled={saving} onChange={(event) => setDescription(event.target.value)} maxLength={500} className="mt-1 h-16 w-full rounded-md border border-line bg-white px-3 py-2 text-sm font-normal" placeholder="Induction rice cooker with ceramic core…" /></label>{error && <p role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p>}<FramrButton className="mt-5 w-full" disabled={saving} onClick={() => void save()}>{saving ? <><Loader2 size={16} className="animate-spin" />Saving…</> : "Save product asset"}</FramrButton></div></Modal>;
+  return <Modal open={open} onClose={close} title="Add a product asset" className="max-w-lg"><div className="px-7 pb-7"><p className="mt-1 text-xs text-inksoft">Add one canonical product image. Optional state views help FRAMR keep products accurate when lids, doors, or handles move.</p><label className="frame-grow relative mt-5 flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-line bg-paper2/60 p-6 text-inksoft transition hover:bg-paper2"><FrameCorners className="text-accent" /><Image size={24} /><span className="text-xs font-semibold">{file ? file.name : "Choose canonical product image"}</span><span className="text-[11px]">JPEG, PNG, or WebP · max 10 MB</span><input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => choosePrimary(event.target.files?.[0])} /></label>{preview && <img src={preview} alt="Canonical product preview" className="mt-3 h-32 w-full rounded-lg border border-line object-cover" />}<div className="mt-4 grid grid-cols-2 gap-3"><label className="text-xs font-semibold">Product name<input value={name} disabled={saving} onChange={(event) => setName(event.target.value)} maxLength={160} className="mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm font-normal" placeholder="Cast iron cooking pot" /></label><label className="text-xs font-semibold">Brand<input value={brand} disabled={saving} onChange={(event) => setBrand(event.target.value)} maxLength={120} className="mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm font-normal" placeholder="Auris" /></label></div><label className="mt-3 block text-xs font-semibold">Description <span className="font-normal text-inksoft">(optional)</span><textarea value={description} disabled={saving} onChange={(event) => setDescription(event.target.value)} maxLength={500} className="mt-1 h-16 w-full rounded-md border border-line bg-white px-3 py-2 text-sm font-normal" placeholder="Red enamel pot with a fitted lid and side handles…" /></label><div className="mt-5 rounded-lg border border-line bg-paper2/50 p-4"><div className="flex items-start justify-between gap-3"><div><div className="text-xs font-bold">Optional product-state views</div><p className="mt-1 text-[11px] leading-relaxed text-inksoft">Add an open-lid, side, or detail view only when it appears in the source video.</p></div><label className={`shrink-0 rounded-md border border-line bg-white px-3 py-2 text-[11px] font-bold text-ink transition hover:bg-paper2 ${references.length >= 4 || saving ? "pointer-events-none opacity-50" : "cursor-pointer"}`}>Add views<input type="file" multiple accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => { addReferences(event.target.files); event.currentTarget.value = ""; }} /></label></div>{references.length > 0 && <div className="mt-3 space-y-2">{references.map((reference) => <div key={reference.id} className="flex items-center gap-2 rounded-md border border-line bg-white p-2"><img src={reference.preview} alt={stateLabels[reference.state]} className="h-10 w-10 rounded object-cover" /><select aria-label="Reference state" value={reference.state} disabled={saving} onChange={(event) => setReferenceState(reference.id, event.target.value as ProductState)} className="h-9 min-w-0 flex-1 rounded-md border border-line bg-white px-2 text-xs"><option value="closed">Closed / canonical view</option><option value="open">Open state</option><option value="side">Side / handle view</option><option value="detail">Detail / label view</option><option value="front">Front view</option><option value="other">Other useful view</option></select><button type="button" aria-label="Remove reference" disabled={saving} onClick={() => removeReference(reference.id)} className="rounded p-2 text-inksoft transition hover:bg-paper2 hover:text-ink"><X size={15} /></button></div>)}</div>}</div>{error && <p role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p>}<FramrButton className="mt-5 w-full" disabled={saving} onClick={() => void save()}>{saving ? <><Loader2 size={16} className="animate-spin" />Saving…</> : "Save product asset"}</FramrButton></div></Modal>;
 }
 
 export function CampaignModal({ open, onClose, onCreate }: { open: boolean; onClose: () => void; onCreate: (campaign: Campaign) => void }) {

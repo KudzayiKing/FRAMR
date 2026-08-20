@@ -17,6 +17,11 @@ class Settings:
     work_dir: Path
     yolo_model: str
     tracker_config: str
+    open_vocabulary_enabled: bool
+    open_vocabulary_model: str
+    open_vocabulary_confidence: float
+    open_vocabulary_samples: int
+    open_vocabulary_device: str
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -40,4 +45,9 @@ class Settings:
             work_dir=work_dir,
             yolo_model=os.getenv("FRAMR_YOLO_MODEL", "yolo11n.pt"),
             tracker_config=os.getenv("FRAMR_TRACKER_CONFIG", "bytetrack.yaml"),
+            open_vocabulary_enabled=os.getenv("FRAMR_OPEN_VOCABULARY", "true").strip().lower() not in {"0", "false", "no"},
+            open_vocabulary_model=os.getenv("FRAMR_OPEN_VOCABULARY_MODEL", "yolov8s-world.pt"),
+            open_vocabulary_confidence=max(0.01, min(0.95, float(os.getenv("FRAMR_OPEN_VOCABULARY_CONFIDENCE", "0.20")))),
+            open_vocabulary_samples=max(4, int(os.getenv("FRAMR_OPEN_VOCABULARY_SAMPLES", "24"))),
+            open_vocabulary_device=os.getenv("FRAMR_OPEN_VOCABULARY_DEVICE", "mps").strip().lower(),
         )
