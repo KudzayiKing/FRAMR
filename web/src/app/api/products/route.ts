@@ -60,6 +60,15 @@ export async function POST(request: Request) {
   const { data: { user }, error: authError } = await client.auth.getUser();
   if (authError || !user) return NextResponse.json({ error: "You must be signed in to add a product." }, { status: 401 });
 
+  const { data: profile } = await client.from("profiles").select("role").eq("id", user.id).maybeSingle();
+  if (!profile || !["creator", "advertiser"].includes(profile.role)) return NextResponse.json({ error: "Your account role is unavailable." }, { status: 403 });
+  let brandId: string | null = null;
+  if (profile.role === "advertiser") {
+    const { data: advertiser } = await client.from("advertiser_profiles").select("brand_id").eq("profile_id", user.id).maybeSingle();
+    if (!advertiser?.brand_id) return NextResponse.json({ error: "Create your brand profile before adding an advertiser product." }, { status: 409 });
+    brandId = advertiser.brand_id;
+  }
+
   let payload: Payload | null;
   try { payload = parse(await request.json()); } catch { return NextResponse.json({ error: "Invalid request body." }, { status: 400 }); }
   if (!payload) return NextResponse.json({ error: "Product metadata or product-state references are incomplete." }, { status: 400 });
@@ -82,7 +91,8 @@ export async function POST(request: Request) {
     .from("products")
     .insert({
       owner_id: user.id,
-      kind: "creator",
+      kind: profile.role,
+      brand_id: brandId,
       name,
       brand: payload.brand?.trim().slice(0, 120) || null,
       description: payload.description?.trim().slice(0, 500) || null,

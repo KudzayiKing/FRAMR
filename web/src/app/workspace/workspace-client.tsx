@@ -1,7 +1,7 @@
 /** Design reference: the application workspace keeps the source's permanent role-based sidebar and compact operational header. */
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   BarChart3,
@@ -27,6 +27,8 @@ import { Toaster } from "@/components/ui/sonner";
 import { FramrMark } from "@/components/framr/FramrMark";
 import { FramrButton, Chip } from "@/components/framr/FramrPrimitives";
 import { AdvertiserWorkspace, CreatorWorkspace } from "@/components/framr/WorkspaceViews";
+import type { CreatorMarketplaceListing, CreatorMarketplaceOffer, PublishablePlacement } from "@/components/framr/CreatorMarketplacePanels";
+import type { AdvertiserBrand, AdvertiserCampaign, AdvertiserListing, AdvertiserProduct } from "@/components/framr/AdvertiserMarketplacePanels";
 import { FrameRunModal } from "@/components/framr/FrameRunModal";
 import { AnalysisProgressModal } from "@/components/framr/AnalysisProgressModal";
 import { MaskRefinementModal } from "@/components/framr/MaskRefinementModal";
@@ -185,6 +187,12 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
   const [videos, setVideos] = useState<Video[]>(() => isSupabaseConfigured ? [] : initialVideos);
   const [assets, setAssets] = useState<ProductAsset[]>(() => isSupabaseConfigured ? [] : initialAssets);
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns);
+  const [creatorListings, setCreatorListings] = useState<CreatorMarketplaceListing[]>([]);
+  const [creatorOffers, setCreatorOffers] = useState<CreatorMarketplaceOffer[]>([]);
+  const [advertiserBrand, setAdvertiserBrand] = useState<AdvertiserBrand | null>(null);
+  const [advertiserProducts, setAdvertiserProducts] = useState<AdvertiserProduct[]>([]);
+  const [advertiserCampaigns, setAdvertiserCampaigns] = useState<AdvertiserCampaign[]>([]);
+  const [advertiserListings, setAdvertiserListings] = useState<AdvertiserListing[]>([]);
   const [modal, setModal] = useState<"upload" | "analysis" | "product" | "campaign" | "mask" | "generate" | "export" | null>(null);
   const [reserve, setReserve] = useState<MarketplaceListing | null>(null);
   const [selectedVideoId, setSelectedVideoId] = useState("v1");
@@ -266,6 +274,119 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
 
   }, []);
 
+  const loadCreatorMarketplace = useCallback(async () => {
+    if (!isSupabaseConfigured) return;
+    const client = getBrowserClient();
+    if (!client) return;
+    const [listingResponse, offerResponse] = await Promise.all([
+      fetch("/api/creator/listings", { cache: "no-store" }),
+      fetch("/api/creator/offers", { cache: "no-store" }),
+    ]);
+    const listingBody = await listingResponse.json().catch(() => null) as { listings?: Array<{
+      id: string; placement_id: string; status: CreatorMarketplaceListing["status"]; price_cents: number; currency: string; creator_notes: string | null; thumbnail_key: string | null;
+      placement: { id: string; object_label: string; category: string | null; duration_seconds: number; quality: CreatorMarketplaceListing["placement"]["quality"] };
+      video: { id: string; title: string; status: string };
+    }>; error?: string } | null;
+    const offerBody = await offerResponse.json().catch(() => null) as { offers?: Array<{
+      id: string; status: CreatorMarketplaceOffer["status"]; price_cents: number; currency: string; created_at: string;
+      funding_status: CreatorMarketplaceOffer["fundingStatus"]; delivery_status: CreatorMarketplaceOffer["deliveryStatus"]; preview_version_id: string | null; payout_status: CreatorMarketplaceOffer["payoutStatus"]; creator_review_note: string | null;
+      campaign: { id: string; name: string }; placement?: { object_label: string; video_title: string } | null; product?: { id: string; name: string; brand: string | null } | null;
+    }>; error?: string } | null;
+    if (!listingResponse.ok || !offerResponse.ok) {
+      if (listingResponse.status !== 500 && offerResponse.status !== 500) toast.error(listingBody?.error ?? offerBody?.error ?? "Marketplace data could not be loaded.");
+      return;
+    }
+    const hydratedListings = await Promise.all((listingBody?.listings ?? []).map(async (listing) => ({
+      id: listing.id,
+      placementId: listing.placement_id,
+      status: listing.status,
+      priceCents: listing.price_cents,
+      currency: listing.currency,
+      creatorNotes: listing.creator_notes,
+      thumbnailUrl: await resolvePrivateUrl(client, listing.thumbnail_key, ""),
+      publishedAt: null,
+      placement: {
+        id: listing.placement.id,
+        objectLabel: listing.placement.object_label,
+        category: listing.placement.category,
+        durationSeconds: listing.placement.duration_seconds,
+        quality: listing.placement.quality,
+      },
+      video: listing.video,
+    })));
+    setCreatorListings(hydratedListings);
+    setCreatorOffers((offerBody?.offers ?? []).map((offer) => ({
+      id: offer.id,
+      status: offer.status,
+      priceCents: offer.price_cents,
+      currency: offer.currency,
+      createdAt: offer.created_at,
+      campaign: offer.campaign,
+      placement: offer.placement ? { objectLabel: offer.placement.object_label, videoTitle: offer.placement.video_title } : null,
+      product: offer.product ?? null,
+      fundingStatus: offer.funding_status,
+      deliveryStatus: offer.delivery_status,
+      previewVersionId: offer.preview_version_id,
+      payoutStatus: offer.payout_status,
+      creatorReviewNote: offer.creator_review_note,
+    })));
+  }, []);
+
+  const loadAdvertiserMarketplace = useCallback(async () => {
+    if (!isSupabaseConfigured) return;
+    const client = getBrowserClient();
+    if (!client) return;
+    const [brandResponse, campaignResponse, marketResponse] = await Promise.all([
+      fetch("/api/advertiser/brand", { cache: "no-store" }),
+      fetch("/api/advertiser/campaigns", { cache: "no-store" }),
+      fetch("/api/advertiser/marketplace", { cache: "no-store" }),
+    ]);
+    const brandBody = await brandResponse.json().catch(() => null) as { brand?: { id: string; name: string; website: string | null } | null; error?: string } | null;
+    const campaignBody = await campaignResponse.json().catch(() => null) as { campaigns?: Array<{ id: string; name: string; status: AdvertiserCampaign["status"]; budget_cents: number; category: string | null; geography: string | null; product_id: string | null; currency: string; metrics: AdvertiserCampaign["metrics"]; offers: AdvertiserCampaign["offers"] }>; products?: Array<{ id: string; name: string; brand: string | null; image_key: string | null }>; error?: string } | null;
+    const marketBody = await marketResponse.json().catch(() => null) as { listings?: Array<{ id: string; price_cents: number; currency: string; object_label: string; category: string | null; duration_seconds: number | null; quality: AdvertiserListing["quality"]; video_title: string | null; creator_notes: string | null; thumbnail_url: string | null; creator: { display_name: string; handle: string | null } }>; error?: string } | null;
+    if (!brandResponse.ok || !campaignResponse.ok || !marketResponse.ok) {
+      const pendingBrandSetup = brandResponse.ok && (campaignResponse.status === 409 || marketResponse.status === 409);
+      if (!pendingBrandSetup) toast.error(brandBody?.error ?? campaignBody?.error ?? marketBody?.error ?? "Advertiser marketplace data could not be loaded.");
+      setAdvertiserBrand(brandBody?.brand ?? null);
+      if (!brandBody?.brand) { setAdvertiserProducts([]); setAdvertiserCampaigns([]); setAdvertiserListings([]); }
+      return;
+    }
+    setAdvertiserBrand(brandBody?.brand ?? null);
+    const hydratedProducts = await Promise.all((campaignBody?.products ?? []).map(async (product) => ({
+      id: product.id,
+      name: product.name,
+      brand: product.brand,
+      imageUrl: await resolvePrivateUrl(client, product.image_key, ""),
+    })));
+    setAdvertiserProducts(hydratedProducts);
+    setAssets(hydratedProducts.map((product) => ({ id: product.id, name: product.name, brand: product.brand ?? "Your brand", category: "Product", image: product.imageUrl, frame: product.imageUrl })));
+    setAdvertiserCampaigns((campaignBody?.campaigns ?? []).map((campaign) => ({
+      id: campaign.id,
+      name: campaign.name,
+      status: campaign.status,
+      budgetCents: campaign.budget_cents,
+      category: campaign.category,
+      geography: campaign.geography,
+      productId: campaign.product_id,
+      currency: campaign.currency,
+      metrics: campaign.metrics,
+      offers: campaign.offers ?? [],
+    })));
+    setAdvertiserListings((marketBody?.listings ?? []).map((listing) => ({
+      id: listing.id,
+      priceCents: listing.price_cents,
+      currency: listing.currency,
+      objectLabel: listing.object_label,
+      category: listing.category,
+      durationSeconds: listing.duration_seconds,
+      quality: listing.quality,
+      videoTitle: listing.video_title,
+      thumbnailUrl: listing.thumbnail_url,
+      creatorNotes: listing.creator_notes,
+      creator: { displayName: listing.creator.display_name, handle: listing.creator.handle },
+    })));
+  }, []);
+
   const loadGenerationProducts = useCallback(async () => {
     const client = getBrowserClient();
     if (!client) return;
@@ -305,7 +426,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     let channel: ReturnType<typeof client.channel> | null = null;
     let cancelled = false;
     const subscribe = async () => {
-      await Promise.all([loadCreatorVideos(), loadGenerationProducts()]);
+      await Promise.all([loadCreatorVideos(), loadGenerationProducts(), loadCreatorMarketplace()]);
       const { data: { user } } = await client.auth.getUser();
       if (cancelled || !user) return;
       channel = client
@@ -325,6 +446,16 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
           { event: "*", schema: "public", table: "products", filter: `owner_id=eq.${user.id}` },
           () => { void loadGenerationProducts(); },
         )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "marketplace_listings", filter: `creator_id=eq.${user.id}` },
+          () => { void loadCreatorMarketplace(); },
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "campaign_placements", filter: `creator_id=eq.${user.id}` },
+          () => { void loadCreatorMarketplace(); },
+        )
         .subscribe();
     };
     void subscribe();
@@ -333,7 +464,43 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       cancelled = true;
       if (channel) void client.removeChannel(channel);
     };
-  }, [loadCreatorVideos, loadGenerationProducts, role]);
+  }, [loadCreatorMarketplace, loadCreatorVideos, loadGenerationProducts, role]);
+
+  useEffect(() => {
+    if (role !== "advertiser" || !isSupabaseConfigured) return;
+    const client = getBrowserClient();
+    if (!client) return;
+    let channel: ReturnType<typeof client.channel> | null = null;
+    let cancelled = false;
+    const subscribe = async () => {
+      await loadAdvertiserMarketplace();
+      const { data: { user } } = await client.auth.getUser();
+      if (cancelled || !user) return;
+      channel = client
+        .channel(`framr-advertiser-market-${user.id}`)
+        .on("postgres_changes", { event: "*", schema: "public", table: "campaigns", filter: `advertiser_id=eq.${user.id}` }, () => { void loadAdvertiserMarketplace(); })
+        .on("postgres_changes", { event: "*", schema: "public", table: "products", filter: `owner_id=eq.${user.id}` }, () => { void loadAdvertiserMarketplace(); })
+        .on("postgres_changes", { event: "*", schema: "public", table: "campaign_placements" }, () => { void loadAdvertiserMarketplace(); })
+        .on("postgres_changes", { event: "*", schema: "public", table: "marketplace_listings" }, () => { void loadAdvertiserMarketplace(); })
+        .subscribe();
+    };
+    void subscribe();
+    return () => { cancelled = true; if (channel) void client.removeChannel(channel); };
+  }, [loadAdvertiserMarketplace, role]);
+
+  useEffect(() => {
+    if (role !== "advertiser" || !isSupabaseConfigured) return;
+    const url = new URL(window.location.href);
+    const payment = url.searchParams.get("payment");
+    if (!payment) return;
+    if (payment === "success") toast.success("Payment confirmed. Choose Start preview when you are ready.");
+    if (payment === "cancel") toast("Checkout was canceled. Your approved offer is still waiting for funding.");
+    url.searchParams.delete("payment");
+    url.searchParams.delete("session_id");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    const refreshTimer = window.setTimeout(() => { void loadAdvertiserMarketplace(); }, 0);
+    return () => window.clearTimeout(refreshTimer);
+  }, [loadAdvertiserMarketplace, role]);
 
   useEffect(() => {
     if (!selectedTarget?.id || !isSupabaseConfigured) return;
@@ -448,6 +615,99 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     await loadCreatorVideos();
   };
 
+  const publishablePlacements = useMemo<PublishablePlacement[]>(() => videos
+    .filter((video) => video.status === "ready")
+    .flatMap((video) => video.placements.map((placement) => ({
+      id: placement.id,
+      videoTitle: video.title,
+      objectLabel: placement.object,
+      category: placement.category,
+      durationSeconds: placement.duration,
+      quality: placement.quality,
+    })))
+    .filter((placement) => !creatorListings.some((listing) => listing.placementId === placement.id)), [creatorListings, videos]);
+
+  const publishListing = async (payload: { placementId: string; priceCents: number; creatorNotes: string }) => {
+    const response = await fetch("/api/creator/listings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) { toast.error(body?.error ?? "That placement could not be published."); return false; }
+    toast.success("Placement published. Brands can request it while your original stays private.");
+    await loadCreatorMarketplace();
+    return true;
+  };
+
+  const updateListing = async (listingId: string, action: "publish" | "pause" | "archive") => {
+    const response = await fetch("/api/creator/listings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ listingId, action }) });
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) { toast.error(body?.error ?? "That listing could not be updated."); return false; }
+    toast.success(action === "archive" ? "Listing archived." : action === "pause" ? "Listing paused." : "Listing published.");
+    await loadCreatorMarketplace();
+    return true;
+  };
+
+  const respondToOffer = async (offerId: string, action: "accept" | "decline") => {
+    const response = await fetch("/api/creator/offers", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ offerId, action }) });
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) { toast.error(body?.error ?? "Your response could not be saved."); return false; }
+    toast.success(action === "accept" ? "Offer accepted. The campaign will move to funding next." : "Offer declined.");
+    await loadCreatorMarketplace();
+    return true;
+  };
+
+  const reviewCreatorDelivery = async (offerId: string, action: "approve" | "request_changes", note: string) => {
+    const response = await fetch(`/api/creator/offers/${offerId}/review`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, note }) });
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) { toast.error(body?.error ?? "Your delivery review could not be saved."); return false; }
+    toast.success(action === "approve" ? "Delivery approved. This placement is now payout eligible." : "Changes requested. The advertiser has been notified.");
+    await loadCreatorMarketplace();
+    return true;
+  };
+
+  const saveAdvertiserBrand = async (payload: { name: string; website: string }) => {
+    const response = await fetch("/api/advertiser/brand", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) { toast.error(body?.error ?? "Your brand could not be saved."); return false; }
+    toast.success("Brand profile saved. You can now add products and campaigns.");
+    await loadAdvertiserMarketplace();
+    return true;
+  };
+
+  const createAdvertiserCampaign = async (payload: { name: string; budgetCents: number; productId: string; category: string; geography: string }) => {
+    const response = await fetch("/api/advertiser/campaigns", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) { toast.error(body?.error ?? "The campaign could not be created."); return false; }
+    toast.success("Campaign created. Choose a creator placement to send your first offer.");
+    await loadAdvertiserMarketplace();
+    setPage("market");
+    return true;
+  };
+
+  const submitAdvertiserOffer = async (payload: { listingId: string; campaignId: string; productId: string }) => {
+    const response = await fetch("/api/advertiser/offers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    if (!response.ok) { toast.error(body?.error ?? "The creator offer could not be sent."); return false; }
+    toast.success("Offer sent. The creator will decide before any preview starts.");
+    await loadAdvertiserMarketplace();
+    return true;
+  };
+
+  const fundAdvertiserOffer = async (offerId: string) => {
+    const response = await fetch(`/api/advertiser/offers/${offerId}/checkout`, { method: "POST" });
+    const body = await response.json().catch(() => null) as { checkoutUrl?: string; error?: string } | null;
+    if (!response.ok || !body?.checkoutUrl) { toast.error(body?.error ?? "Secure checkout could not be opened."); return false; }
+    window.location.assign(body.checkoutUrl);
+    return true;
+  };
+
+  const requestAdvertiserPreview = async (offerId: string) => {
+    const response = await fetch(`/api/advertiser/offers/${offerId}/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) });
+    const body = await response.json().catch(() => null) as { runId?: string; reused?: boolean; error?: string } | null;
+    if (!response.ok || !body?.runId) { toast.error(body?.error ?? "The funded preview could not be started."); return false; }
+    toast.success(body.reused ? "Your preview is already in progress." : "Preview started. The creator will review it when it is ready.");
+    await loadAdvertiserMarketplace();
+    return true;
+  };
+
   const nav = role === "creator" ? creatorNav : advertiserNav;
   const title = nav.find((item) => item.id === page)?.label ?? page;
   const selectedVideo = videos.find((video) => video.id === selectedVideoId) ?? videos[0] ?? null;
@@ -481,6 +741,13 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
     assets,
     campaigns,
     search,
+    creatorListings,
+    publishablePlacements,
+    creatorOffers,
+    advertiserBrand,
+    advertiserProducts,
+    advertiserCampaigns,
+    advertiserListings,
     onPage: setPage,
     onSelectVideo: (videoId: string) => {
       setSelectedVideoId(videoId);
@@ -502,6 +769,15 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       window.open(body.url, "_blank", "noopener,noreferrer");
     },
     onReserve: (listing: MarketplaceListing) => setReserve(listing),
+    onPublishListing: publishListing,
+    onUpdateListing: updateListing,
+    onRespondToOffer: respondToOffer,
+    onReviewCreatorDelivery: reviewCreatorDelivery,
+    onSaveAdvertiserBrand: saveAdvertiserBrand,
+    onCreateAdvertiserCampaign: createAdvertiserCampaign,
+    onSubmitAdvertiserOffer: submitAdvertiserOffer,
+    onFundAdvertiserOffer: fundAdvertiserOffer,
+    onRequestAdvertiserPreview: requestAdvertiserPreview,
     onToggleVersion: async (_videoId: string, versionId: string) => {
       if (versionId.startsWith("source-")) return;
       const current = selectedVideo?.versions.find((version) => version.id === versionId);
@@ -525,7 +801,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
         {nav.map(({ id, label, icon: Icon }, index) => <button key={id} onClick={() => { setPage(id); setMobileOpen(false); }} className={`nav-item ${page === id ? "nav-item--active" : ""} ${index === nav.length - 2 ? "mt-4 border-t border-line pt-4" : ""}`}>
           <Icon size={16} />{label}
           {label === "Videos" && <span className="ml-auto text-[10px] font-bold">{videos.length}</span>}
-          {label === "Campaigns" && role === "creator" && <span className="ml-auto text-[10px] font-bold text-accent">2</span>}
+          {label === "Campaigns" && role === "creator" && creatorOffers.filter((offer) => offer.status === "submitted").length > 0 && <span className="ml-auto text-[10px] font-bold text-accent">{creatorOffers.filter((offer) => offer.status === "submitted").length}</span>}
         </button>)}
       </nav>
       <div className="border-t border-line p-3"><div className="flex items-center gap-3 p-2">
@@ -541,7 +817,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
         <h1 className="text-lg font-extrabold tracking-tight">{title}</h1>
         <Chip className="hidden bg-paper2 text-inksoft sm:inline-flex">{isSupabaseConfigured ? "LIVE WORKSPACE" : "DEMO WORKSPACE"}</Chip>
         <div className="relative ml-auto hidden md:block"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-inksoft" size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 w-56 rounded-md border border-line bg-white py-0 pl-9 pr-3 text-sm placeholder:text-inksoft/60" placeholder={role === "creator" ? "Search videos, placements…" : "Search marketplace…"} /></div>
-        <FramrButton size="sm" variant="accent" onClick={() => setModal(role === "creator" ? "upload" : "campaign")}>{role === "creator" ? <><Upload size={16} /><span className="hidden sm:inline">Upload video</span></> : <><Plus size={16} /><span className="hidden sm:inline">New campaign</span></>}</FramrButton>
+        <FramrButton size="sm" variant="accent" onClick={() => role === "creator" ? setModal("upload") : setPage("campaigns")}>{role === "creator" ? <><Upload size={16} /><span className="hidden sm:inline">Upload video</span></> : <><Plus size={16} /><span className="hidden sm:inline">New campaign</span></>}</FramrButton>
       </header>
       <main className="mx-auto w-full max-w-[1400px] p-5 sm:p-8">{role === "creator" ? <CreatorWorkspace {...contentProps} /> : <AdvertiserWorkspace {...contentProps} />}</main>
     </div>
@@ -553,7 +829,7 @@ function Workspace({ role, onExit, onSignOut }: WorkspaceProps) {
       onReady={finishAnalysis}
       onClose={() => { setModal(null); setPendingPlacementVideoId(null); setPage("videos"); }}
     />
-    <ProductModal open={modal === "product"} onClose={() => setModal(null)} onSave={(asset) => { setAssets((items) => [asset, ...items]); void loadGenerationProducts(); }} />
+    <ProductModal open={modal === "product"} onClose={() => setModal(null)} onSave={(asset) => { setAssets((items) => [asset, ...items]); if (role === "creator") void loadGenerationProducts(); else void loadAdvertiserMarketplace(); }} />
     <CampaignModal open={modal === "campaign"} onClose={() => setModal(null)} onCreate={(campaign) => setCampaigns((items) => [campaign, ...items])} />
     <MaskRefinementModal
       open={modal === "mask"}
